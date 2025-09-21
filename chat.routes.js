@@ -83,29 +83,45 @@ function toOpenAIMessages(history = []) {
   );
 }
 
-// very light slot detection as a server-side fallback (guarantees trigger)
+/**
+ * Build slot state ONLY from user messages AFTER the last plan snapshot marker.
+ * This allows multiple plans in one chat without old info re-triggering new plan cards.
+ */
 function deriveSlots(history = []) {
-  const allUserText = history
-    .filter((m) => m.role === "user" && typeof m.text === "string")
+  const userMsgs = history.filter((m) => m.role === "user" && typeof m.text === "string");
+
+  // find last snapshot index among user messages
+  let lastSnapshotIdx = -1;
+  for (let i = userMsgs.length - 1; i >= 0; i--) {
+    if (/\[plan_snapshot\]/i.test(userMsgs[i].text)) {
+      lastSnapshotIdx = i;
+      break;
+    }
+  }
+
+  // take user texts AFTER the last snapshot (or all if none)
+  const recentUserText = userMsgs
+    .slice(lastSnapshotIdx + 1)
     .map((m) => m.text)
-    .join("\n")
-    .toLowerCase();
+    .join("\n");
+
+  const txt = recentUserText.toLowerCase();
 
   const datesKnown =
-    /📅/.test(allUserText) ||
-    /from\s+\d{4}-\d{2}-\d{2}\s+to\s+\d{4}-\d{2}-\d{2}/i.test(allUserText);
+    /📅/.test(txt) ||
+    /from\s+\d{4}-\d{2}-\d{2}\s+to\s+\d{4}-\d{2}-\d{2}/i.test(recentUserText);
 
   const guestsKnown =
-    /👤/.test(allUserText) ||
-    (/(adult|adults|children|kids|\bguests?\b|\bpeople\b)/i.test(allUserText) && /\d/.test(allUserText));
+    /👤/.test(txt) ||
+    (/(adult|adults|children|kids|\bguests?\b|\bpeople\b)/i.test(recentUserText) && /\d/.test(recentUserText));
 
   const destinationKnown =
     /(barcelona|paris|rome|london|madrid|dubai|tokyo|new york|milan|istanbul|bali|amsterdam)/i.test(
-      allUserText
-    ) || /\b(to|in|for)\s+[A-Z][a-z]+/.test(allUserText);
+      recentUserText
+    ) || /\b(to|in|for)\s+[A-Z][a-z]+/.test(recentUserText);
 
   const location =
-    (allUserText.match(
+    (recentUserText.match(
       /(barcelona|paris|rome|london|madrid|dubai|tokyo|new york|milan|istanbul|bali|amsterdam)/i
     ) || [])[0] || "Your Trip";
 
@@ -119,6 +135,20 @@ function looksLikeDateAsk(text = "") {
 function looksLikeGuestAsk(text = "") {
   const t = text.toLowerCase();
   return /(how many (people|guests|travellers|travelers)|adults|children)/i.test(t);
+}
+
+function guessDatesFromHistory(history) {
+  const txt = history
+    .filter((m) => m.role === "user")
+    .map((m) => m.text)
+    .join(" ");
+  const m = txt.match(/📅.*?(\d{4}-\d{2}-\d{2}).*?(\d{4}-\d{2}-\d{2})/);
+  if (m) return `${m[1]} – ${m[2]}`;
+  return null;
+}
+
+function capitalize(s = "") {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 /* -------------------------------- Route -------------------------------- */
@@ -168,7 +198,7 @@ router.post("/chat/travel", async (req, res) => {
       aiText = aiText || "How many travelers? 👇";
     }
 
-    // HARD FALLBACK by slots
+    // HARD FALLBACK by slots — only consider NEW info since last plan snapshot.
     if (!signal) {
       const slots = deriveSlots(messages);
 
@@ -179,6 +209,7 @@ router.post("/chat/travel", async (req, res) => {
         signal = { type: "guestsNeeded", payload: { minInfo: "adults and children" } };
         aiText = aiText || "Great — how many travelers? 👇";
       } else if (slots.destinationKnown && slots.datesKnown && slots.guestsKnown) {
+        // New full set since last snapshot → create a new plan fallback
         signal = {
           type: "planReady",
           payload: {
@@ -201,19 +232,5 @@ router.post("/chat/travel", async (req, res) => {
     return res.status(500).json({ error: "chat_failed", message: err?.message || "Unknown error" });
   }
 });
-
-function guessDatesFromHistory(history) {
-  const txt = history
-    .filter((m) => m.role === "user")
-    .map((m) => m.text)
-    .join(" ");
-  const m = txt.match(/📅.*?(\d{4}-\d{2}-\d{2}).*?(\d{4}-\d{2}-\d{2})/);
-  if (m) return `${m[1]} – ${m[2]}`;
-  return null;
-}
-
-function capitalize(s = "") {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
 
 export default router;
