@@ -132,7 +132,7 @@ router.post("/chat/travel", async (req, res) => {
       messages: convo,
       tools,
       tool_choice: "auto",
-      temperature: 0.6,
+      temperature: 0.3,
     });
 
     let aiText = completion.choices?.[0]?.message?.content || "";
