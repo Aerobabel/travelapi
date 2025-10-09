@@ -153,73 +153,46 @@ function priceTrip({ place, days, pax, className, comfortBias }) {
 /* ------------------------------ LLM config ------------------------------ */
 const tools = [
   { type: "function", function: { name: "request_dates", description: "Need travel dates.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "request_guests", description: "Need traveler counts.", parameters: { type: "object", properties: { minInfo: { type: "string" } } } } },
+  { type: "function", function: { name: "request_guests", description: "Need traveler counts.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: {
       name: "create_plan",
-      description: "Return a full, detailed, day-by-day travel plan when destination, dates, and guests are known.",
+      description: "Return a full, detailed, day-by-day travel plan with a cost breakdown when destination, dates, and guests are known.",
       parameters: {
         type: "object",
         properties: {
-          location: { type: "string" },
-          country: { type: "string" },
-          dateRange: { type: "string", description: "e.g., 26.12.2024 - 03.01.2025" },
-          description: { type: "string", description: "A balanced mix of iconic sights..." },
-          image: { type: "string", description: "A direct images.unsplash.com URL" },
-          price: { type: "number" },
+          location: { type: "string" }, country: { type: "string" },
+          dateRange: { type: "string" }, description: { type: "string" },
+          image: { type: "string" }, price: { type: "number" },
           weather: { type: "object", properties: { temp: { type: "number" }, icon: { type: "string" } } },
-          itinerary: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                date: { type: "string", description: "Full date, e.g., 2024-12-26" },
-                day: { type: "string", description: "Short day name, e.g., Dec 26" },
-                events: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      type: { type: "string", enum: ["transport", "flight", "accommodation", "activity", "meal", "tour"] },
-                      icon: { type: "string", enum: ["car", "airplane", "bed", "camera", "restaurant", "walk"] },
-                      time: { type: "string", description: "e.g., 08:45" },
-                      duration: { type: "string", description: "e.g., 1 hour" },
-                      title: { type: "string" },
-                      details: { type: "string" }
-                    },
-                    required: ["type", "icon", "time", "duration", "title", "details"]
-                  }
-                }
-              },
-              required: ["date", "day", "events"]
-            }
+          itinerary: { type: "array", items: { type: "object", properties: { date: { type: "string" }, day: { type: "string" }, events: { type: "array", items: { type: "object", properties: { type: { type: "string" }, icon: { type: "string" }, time: { type: "string" }, duration: { type: "string" }, title: { type: "string" }, details: { type: "string" } }, required: ["type", "icon", "time", "duration", "title", "details"] } } }, required: ["date", "day", "events"] } },
+          // ✅ ADDED a new `costBreakdown` section to the AI instructions
+          costBreakdown: {
+            type: "array", items: { type: "object", properties: {
+              item: { type: "string" }, provider: { type: "string" }, details: { type: "string" },
+              price: { type: "number" }, iconType: { type: "string", enum: ["image", "date"] },
+              iconValue: { type: "string", description: "URL for image, or 'Month Day' for date (e.g., 'Dec 26')" }
+            }, required: ["item", "provider", "details", "price", "iconType", "iconValue"] }
           }
         },
-        required: ["location", "country", "dateRange", "description", "image", "price", "itinerary"],
+        required: ["location", "country", "dateRange", "description", "image", "price", "itinerary", "costBreakdown"],
       },
   } }
 ];
 
 const SYSTEM = `
-You are a proactive, friendly travel planner who creates DETAILED, day-by-day itineraries.
+You are a proactive, friendly travel planner who creates DETAILED, day-by-day itineraries and a cost breakdown.
 UI:
-- If you need DATES, call request_dates (one short friendly line allowed).
+- If you need DATES, call request_dates.
 - If you need GUESTS, call request_guests.
-- When destination, dates, and guests are known, call create_plan with a COMPLETE itinerary.
+- When ready, call create_plan with a COMPLETE itinerary AND cost_breakdown.
 Rules:
-- After a destination appears, ask the PURPOSE (business, relax, sightseeing, etc.).
-- The plan MUST cover every day of the trip.
-- For each day, create at least 3-5 events (e.g., flight, hotel check-in, transfer, tour, meal, museum visit).
-- Vary the activities. Include transport, accommodation, and leisure.
-- Always give a concrete USD price (no "depends").
+- Create at least 5-7 items for the cost_breakdown (e.g., flights, transfers, hotels, insurance, excursions).
 - For the weather icon, use one of these exact strings: "sunny", "partly-sunny", "cloudy", "rainy", "snow". DO NOT use emojis.
-- Rotate images via Unsplash; return direct images.unsplash.com links when possible.
-- Include average weather (°C) for the selected dates when available.
+- The total plan price must equal the sum of the cost_breakdown prices.
 `;
 
 const toOpenAIMessages = (history=[]) =>
-  history.map(m => m.role === "user" ? { role: "user", content: m.text }
-    : m.role === "system" ? { role: "system", content: m.text }
-    : { role: "assistant", content: m.text });
+  history.map(m => m.role === "user" ? { role: "user", content: m.text } : { role: "assistant", content: m.text });
 
 const lastSnapshotIdx = (h=[]) => { for (let i=h.length-1;i>=0;i--) if (/\[plan_snapshot\]/i.test(h[i]?.text||"")) return i; return -1; };
 function deriveSlots(history=[]) {
@@ -238,184 +211,86 @@ function deriveSlots(history=[]) {
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
   const tStart = performance.now?.() ?? Date.now();
-
   try {
-    const { messages = [], userId = "anonymous" } = req.body || {};
-    logInfo(reqId, `POST /chat/travel @ ${now()}`);
-    logInfo(reqId, `node=${NODE_VER}, fetch=${FETCH_SOURCE}, hasKey=${hasKey}`);
-    logInfo(reqId, `payload messages=${messages.length}, userId=${userId}`);
-
-    const mem = getMem(userId);
-    const joined = messages.filter(m=>m.role==="user").map(m=>m.text).join("\n").toLowerCase();
-
-    // light preference learning
-    if (/i (like|love).*(hiking|museums|shopping|wine|extreme)/.test(joined)) {
-      const act = joined.match(/hiking|museums|shopping|wine tasting|extreme sports/);
-      if (act && !mem.profile.liked_activities.includes(act[0])) {
-        mem.profile.liked_activities.push(act[0]);
-        logInfo(reqId, "learned activity:", act[0]);
-      }
-    }
-
-    /* --------------------------- Slot flow helper --------------------------- */
+    const { messages = [] } = req.body || {};
+    logInfo(reqId, `POST /chat/travel @ ${now()}, hasKey=${hasKey}`);
+    const mem = getMem("anonymous");
+    
     const runSlotFlow = async () => {
       const slots = deriveSlots(messages);
       logInfo(reqId, "slots:", slots);
 
-      if (slots.destinationKnown && !slots.purposeKnown) {
-        return { aiText: `Nice choice — ${slots.destination}! Is this more of a business trip, a relaxing getaway, or sightseeing/photography?`, signal: null };
-      }
-      if (slots.destinationKnown && !slots.datesKnown) {
-        return { aiText: "Great — pick your travel dates below 👇", signal: { type: "dateNeeded" } };
-      }
-      if (slots.destinationKnown && slots.datesKnown && !slots.guestsKnown) {
-        return { aiText: "How many travelers are going? 👇", signal: { type: "guestsNeeded", payload: { minInfo: "adults and children" } } };
-      }
+      if (slots.destinationKnown && !slots.purposeKnown) return { aiText: `Nice choice — ${slots.destination}! Is this a business trip, a relaxing getaway, or sightseeing?` };
+      if (slots.destinationKnown && !slots.datesKnown) return { aiText: "Great — pick your travel dates below 👇", signal: { type: "dateNeeded" } };
+      if (slots.destinationKnown && slots.datesKnown && !slots.guestsKnown) return { aiText: "How many travelers are going? 👇", signal: { type: "guestsNeeded" } };
 
       if (slots.destinationKnown && slots.datesKnown && slots.guestsKnown) {
         const dest = "Barcelona";
         const dates = { start: "2024-12-26", end: "2025-01-03", pretty: "26.12.2024 - 03.01.2025" };
-
-        const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto-format&fit=crop";
-        const image = await pickPhoto(mem, dest, fallbackImg, reqId);
-        
+        const image = await pickPhoto(mem, dest, "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto=format&fit=crop", reqId);
         const weather = { temp: 26, icon: 'sunny', country: 'Spain' };
-
-        const paxMatch = joined.match(/(\d+)\s*(adult|adults|people|guests)/);
-        const kidsMatch = joined.match(/(\d+)\s*(child|children|kids)/);
-        const adults = paxMatch ? parseInt(paxMatch[1],10) : 1;
-        const children = kidsMatch ? parseInt(kidsMatch[1],10) : 0;
-        const pax = adults + children;
-
-        const numDays = daysBetween(dates.start, dates.end);
-        const price = priceTrip({ place: dest, days: numDays, pax, className: "economy", comfortBias: "balanced" });
-
         const description = `A balanced mix of iconic sights, beaches, and authentic local experiences.`;
+        
+        // ✅ START: New Mock Data for Cost Breakdown
+        const costBreakdown = [
+            { item: 'Transfer to airport (26.12)', provider: 'GetTransfer', details: 'gettransfer.com', price: 40.00, iconType: 'image', iconValue: 'https://i.imgur.com/Wv2kHwE.png' },
+            { item: 'Fly Tickets', provider: 'Wizz Air', details: '04:45 IST → 21:15 BCN | 18h/1 change, 12h London', price: 125.00, iconType: 'date', iconValue: 'Dec 26' },
+            { item: 'Transfer to hotel (26.12)', provider: 'GetTransfer', details: 'gettransfer.com', price: 40.00, iconType: 'image', iconValue: 'https://i.imgur.com/Wv2kHwE.png' },
+            { item: 'Hotel', provider: 'Radisson (Family suit)', details: 'radisson.com', price: 570.00, iconType: 'image', iconValue: 'https://i.imgur.com/nJb4V2K.png' },
+            { item: 'Excursions', provider: 'Get Your Guide', details: 'getyourguide.com', price: 250.00, iconType: 'image', iconValue: 'https://i.imgur.com/wxgc4G1.png' },
+            { item: 'Transfer to airport (03.01)', provider: 'GetTransfer', details: 'gettransfer.com', price: 40.00, iconType: 'image', iconValue: 'https://i.imgur.com/Wv2kHwE.png' },
+            { item: 'Fly Tickets', provider: 'Wizz Air', details: '21:15 BCN → 13:45 (04.01) IST | 17h/1 change, 11h London', price: 125.00, iconType: 'date', iconValue: 'Jan 03' },
+            { item: 'Transfer to home (04.01)', provider: 'GetTransfer', details: 'gettransfer.com', price: 40.00, iconType: 'image', iconValue: 'https://i.imgur.com/Wv2kHwE.png' },
+            { item: 'Insurance', provider: 'Axa Schengen', details: 'axa-schengen.com', price: 40.00, iconType: 'image', iconValue: 'https://i.imgur.com/39F3YMX.png' }
+        ];
+        const totalPrice = costBreakdown.reduce((sum, item) => sum + item.price, 0);
+        // ✅ END: New Mock Data
 
-        // --- MOCK ITINERARY ---
         const itinerary = [
-          {
-            date: "2024-12-26",
-            day: "Dec 26",
-            events: [
-              { type: "transport", icon: "car", time: "01:45", duration: "1 hour", title: "Transfer to airport", details: "Full information will be after purchase" },
-              { type: "flight", icon: "airplane", time: "04:45", duration: "3 hour", title: "Flight WZ389", details: "You will go to London, 12 hours waiting" },
-              { type: "flight", icon: "airplane", time: "18:15", duration: "3 hour", title: "Flight WZ345", details: "You will go to Barcelona" },
-              { type: "transport", icon: "car", time: "21:45", duration: "1 hour", title: "Transfer to hotel", details: "Full information will be after purchase" },
-              { type: "accommodation", icon: "bed", time: "22:45", duration: "1 hour", title: "Hotel: Blue Radisson Barcelona", details: "Full information will be after purchase" },
-            ]
-          },
-          {
-            date: "2024-12-27",
-            day: "Dec 27",
-            events: [
-              { type: "meal", icon: "restaurant", time: "09:00", duration: "1.5 hours", title: "Breakfast at Brunch & Cake", details: "Famous local spot for creative dishes." },
-              { type: "tour", icon: "walk", time: "11:00", duration: "3 hours", title: "Gothic Quarter Walking Tour", details: "Explore the historic heart of the city." },
-              { type: "activity", icon: "camera", time: "15:00", duration: "2 hours", title: "Visit La Sagrada Familia", details: "Entry tickets pre-booked." },
-            ]
-          },
-          {
-            date: "2024-12-28",
-            day: "Dec 28",
-            events: [
-              { type: "activity", icon: "camera", time: "10:00", duration: "4 hours", title: "Explore Park Güell", details: "Enjoy Gaudí's whimsical park." },
-              { type: "meal", icon: "restaurant", time: "14:00", duration: "2 hours", title: "Lunch at El Nacional", details: "A beautiful food hall with multiple options." },
-              { type: "activity", icon: "walk", time: "17:00", duration: "3 hours", title: "Stroll down La Rambla", details: "Experience the vibrant street life." },
-            ]
-          }
+          { date: "2024-12-26", day: "Dec 26", events: [ { type: "transport", icon: "car", time: "01:45", duration: "1 hour", title: "Transfer to airport", details: "Full information will be after purchase" }, { type: "flight", icon: "airplane", time: "04:45", duration: "18 hour", title: "Flight WZ389", details: "You will go to London, 12 hours waiting" }, { type: "flight", icon: "airplane", time: "18:15", duration: "3 hour", title: "Flight WZ345", details: "You will go to Barcelona" }, { type: "transport", icon: "car", time: "21:45", duration: "1 hour", title: "Transfer to hotel", details: "Full information will be after purchase" }, { type: "accommodation", icon: "bed", time: "22:45", duration: "N/A", title: "Hotel: Blue Radisson Barcelona", details: "Check-in and relax for the night" } ] },
+          { date: "2024-12-27", day: "Dec 27", events: [ { type: "meal", icon: "restaurant", time: "09:00", duration: "1.5 hours", title: "Breakfast at Brunch & Cake", details: "Famous local spot for creative dishes." }, { type: "tour", icon: "walk", time: "11:00", duration: "3 hours", title: "Gothic Quarter Walking Tour", details: "Explore the historic heart of the city." }, { type: "activity", icon: "camera", time: "15:00", duration: "2 hours", title: "Visit La Sagrada Familia", details: "Entry tickets pre-booked." } ] },
         ];
 
-        const payload = { location: dest, country: weather.country, dateRange: dates.pretty, description, image, price, weather, itinerary };
-        logInfo(reqId, "plan payload prepared (mock)");
+        const payload = { location: dest, country: weather.country, dateRange: dates.pretty, description, image, price: totalPrice, weather, itinerary, costBreakdown };
         return { aiText: "Here’s a tailored draft ✨", signal: { type: "planReady", payload } };
       }
 
-      return { aiText: "Tell me where you’d like to fly 🌍", signal: null };
+      return { aiText: "Tell me where you’d like to fly 🌍" };
     };
 
-    /* ----------------------------- No key path ------------------------------ */
     if (!hasKey) {
       logWarn(reqId, "OPENAI_API_KEY missing — using slot flow");
       const out = await runSlotFlow();
-      const tEnd = performance.now?.() ?? Date.now();
-      logInfo(reqId, `responded (mock) in ${Math.round(tEnd - tStart)}ms`);
       return res.json(out);
     }
-
-    /* ----------------------------- OpenAI path ------------------------------ */
-    let aiText = "";
-    let signal = null;
-
+    
     const convo = [{ role: "system", content: SYSTEM }, ...toOpenAIMessages(messages)];
-    logInfo(reqId, "openai.chat.completions.create start");
-    const tAI0 = performance.now?.() ?? Date.now();
-    let completion = null;
-
-    try {
-      completion = await client.chat.completions.create({
-        model: "gpt-4o",
-        messages: convo,
-        tools,
-        tool_choice: "auto",
-        temperature: 0.3,
-      });
-    } catch (e) {
-      const tAI1 = performance.now?.() ?? Date.now();
-      logError(reqId, `openai failed after ${Math.round(tAI1 - tAI0)}ms:`, e?.status || "", e?.message || e);
-      const out = await runSlotFlow();
-      const tEnd = performance.now?.() ?? Date.now();
-      logInfo(reqId, `responded (fallback) in ${Math.round(tEnd - tStart)}ms`);
-      return res.json(out);
-    }
-
-    const tAI1 = performance.now?.() ?? Date.now();
-    logInfo(reqId, `openai completed in ${Math.round(tAI1 - tAI0)}ms`);
-
-    aiText = completion?.choices?.[0]?.message?.content || "";
+    const completion = await client.chat.completions.create({ model: "gpt-4o", messages: convo, tools, tool_choice: "auto", temperature: 0.3 });
+    
+    let aiText = completion?.choices?.[0]?.message?.content || "";
+    let signal = null;
     const toolCall = completion?.choices?.[0]?.message?.tool_calls?.[0];
+
     if (toolCall) {
       const name = toolCall.function?.name;
       let args = {};
-      try { args = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {}; } catch {}
-      logInfo(reqId, "tool call:", name, "args:", args ? Object.keys(args) : "none");
+      try { args = JSON.parse(toolCall.function.arguments); } catch {}
+      logInfo(reqId, "tool call:", name);
 
-      if (name === "request_dates") {
-        signal = { type: "dateNeeded" };
-        if (!aiText) aiText = "Great — pick your travel dates below 👇";
-      } else if (name === "request_guests") {
-        signal = { type: "guestsNeeded", payload: args };
-        if (!aiText) aiText = "Awesome — how many are traveling? 👇";
-      } else if (name === "create_plan") {
-        if (args?.image && /source\.unsplash\.com/.test(args.image)) {
-          const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto-format&fit=crop";
-          args.image = await resolveUnsplashDirect(args.image, fallbackImg, reqId);
-        }
-
-        // ✅ START OF THE FIX: Sanitize the weather icon from the AI
+      if (name === "request_dates") signal = { type: "dateNeeded" };
+      else if (name === "request_guests") signal = { type: "guestsNeeded" };
+      else if (name === "create_plan") {
         if (args.weather && args.weather.icon) {
           const icon = args.weather.icon.toLowerCase();
-          if (icon.includes('☀️') || icon.includes('sunny')) {
-            args.weather.icon = 'sunny';
-          } else if (icon.includes('⛅️') || icon.includes('partly-sunny')) {
-            args.weather.icon = 'partly-sunny';
-          } else if (icon.includes('☁️') || icon.includes('cloud')) {
-            args.weather.icon = 'cloudy';
-          } else if (icon.includes('🌧️') || icon.includes('rain')) {
-            args.weather.icon = 'rainy';
-          } else if (icon.includes('❄️') || icon.includes('snow')) {
-            args.weather.icon = 'snow';
-          } else {
-            // If it's something unexpected, default to "sunny"
-            args.weather.icon = 'sunny';
-          }
+          if (icon.includes('☀️') || icon.includes('sunny')) args.weather.icon = 'sunny';
+          else if (icon.includes('⛅️') || icon.includes('partly')) args.weather.icon = 'partly-sunny';
+          else if (icon.includes('☁️') || icon.includes('cloud')) args.weather.icon = 'cloudy';
+          else args.weather.icon = 'sunny';
         }
-        // ✅ END OF THE FIX
-
         signal = { type: "planReady", payload: args };
-        if (!aiText) aiText = "Here’s your plan ✨";
       }
     }
-
+    
     if (!signal) {
       logInfo(reqId, "no tool used — running slot flow for guidance");
       const out = await runSlotFlow();
@@ -423,16 +298,11 @@ router.post("/travel", async (req, res) => {
       signal = out.signal;
     }
 
-    if (!signal && !aiText) aiText = "Tell me where you’d like to fly 🌍";
-
-    const tEnd = performance.now?.() ?? Date.now();
-    logInfo(reqId, `responded 200 in ${Math.round(tEnd - tStart)}ms`);
     return res.json({ aiText, signal });
 
   } catch (err) {
-    const tEnd = performance.now?.() ?? Date.now();
-    logError(reqId, `handler crashed after ${Math.round(tEnd - tStart)}ms:`, err?.stack || err?.message || err);
-    return res.json({ aiText: "Server hiccup — try again in a sec?", signal: null });
+    logError(reqId, `handler crashed:`, err?.stack || err?.message || err);
+    return res.json({ aiText: "Server hiccup — try again in a sec?" });
   }
 });
 
