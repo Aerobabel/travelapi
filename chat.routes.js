@@ -17,7 +17,6 @@ try {
     FETCH_SOURCE = "node-fetch";
   }
 } catch (e) {
-  // If node-fetch dynamic import somehow fails, log and keep going (OpenAI path will still work)
   console.error("[chat] fetch polyfill load failed:", e?.message);
 }
 
@@ -113,16 +112,16 @@ async function geocodePlace(place, reqId) {
   if (!r.ok) throw new Error(`geocode ${r.status}`);
   const j = await r.json();
   const hit = j?.results?.[0];
-  return hit ? { lat: hit.latitude, lon: hit.longitude } : null;
+  return hit ? { lat: hit.latitude, lon: hit.longitude, country: hit.country } : null;
 }
 function parseDatesFromHistory(history) {
   const txt = history.filter(m => m.role === "user").map(m => m.text).join(" ");
   const m = txt.match(/(\d{4}-\d{2}-\d{2}).*?(\d{4}-\d{2}-\d{2})/);
-  return m ? { start: m[1], end: m[2], pretty: `${m[1]} – ${m[2]}` } : null;
+  return m ? { start: m[1], end: m[2], pretty: `${m[1].replace(/-/g, '.')} - ${m[2].replace(/-/g, '.')}` } : null;
 }
 function daysBetween(a, b) {
   const A = new Date(a + "T00:00:00Z"); const B = new Date(b + "T00:00:00Z");
-  return Math.max(1, Math.round((B - A) / 86400000));
+  return Math.max(1, Math.round((B - A) / 86400000) + 1);
 }
 async function getAverageWeather(place, startISO, endISO, reqId) {
   const geo = await geocodePlace(place, reqId);
@@ -138,8 +137,8 @@ async function getAverageWeather(place, startISO, endISO, reqId) {
   const min = j?.daily?.temperature_2m_min || [];
   if (!max.length || !min.length) return null;
   const avg = (max.reduce((s,x)=>s+x,0)+min.reduce((s,x)=>s+x,0))/(max.length+min.length);
-  const icon = avg >= 25 ? "sunny-outline" : avg >= 15 ? "partly-sunny-outline" : "cloud-outline";
-  return { tempC: Math.round(avg), icon };
+  const icon = avg >= 25 ? "sunny" : avg >= 15 ? "partly-sunny" : "cloudy";
+  return { temp: Math.round(avg), icon, country: geo.country };
 }
 function priceTrip({ place, days, pax, className, comfortBias }) {
   const baseMap = { Paris:240, London:260, Rome:200, Barcelona:190, Bali:110, Tokyo:230, "New York":300, Dubai:260, Istanbul:150, Amsterdam:210, Madrid:180, Milan:210, Lisbon:170, Kyoto:220, Prague:160 };
@@ -157,34 +156,63 @@ const tools = [
   { type: "function", function: { name: "request_guests", description: "Need traveler counts.", parameters: { type: "object", properties: { minInfo: { type: "string" } } } } },
   { type: "function", function: {
       name: "create_plan",
-      description: "Return a plan card when destination+dates+guests are known.",
+      description: "Return a full, detailed, day-by-day travel plan when destination, dates, and guests are known.",
       parameters: {
         type: "object",
         properties: {
           location: { type: "string" },
-          dates: { type: "string" },
-          description: { type: "string" },
-          image: { type: "string" },
-          price: { type: "string" },
-          weather: { type: "object", properties: { tempC: { type: "number" }, icon: { type: "string" } } },
+          country: { type: "string" },
+          dateRange: { type: "string", description: "e.g., 26.12.2024 - 03.01.2025" },
+          description: { type: "string", description: "A balanced mix of iconic sights..." },
+          image: { type: "string", description: "A direct images.unsplash.com URL" },
+          price: { type: "number" },
+          weather: { type: "object", properties: { temp: { type: "number" }, icon: { type: "string" } } },
+          itinerary: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                date: { type: "string", description: "Full date, e.g., 2024-12-26" },
+                day: { type: "string", description: "Short day name, e.g., Dec 26" },
+                events: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      type: { type: "string", enum: ["transport", "flight", "accommodation", "activity", "meal", "tour"] },
+                      icon: { type: "string", enum: ["car", "airplane", "bed", "camera", "restaurant", "walk"] },
+                      time: { type: "string", description: "e.g., 08:45" },
+                      duration: { type: "string", description: "e.g., 1 hour" },
+                      title: { type: "string" },
+                      details: { type: "string" }
+                    },
+                    required: ["type", "icon", "time", "duration", "title", "details"]
+                  }
+                }
+              },
+              required: ["date", "day", "events"]
+            }
+          }
         },
-        required: ["location","dates","description","image","price"],
+        required: ["location", "country", "dateRange", "description", "image", "price", "itinerary"],
       },
   } }
 ];
 
 const SYSTEM = `
-You are a proactive, friendly travel planner.
+You are a proactive, friendly travel planner who creates DETAILED, day-by-day itineraries.
 UI:
 - If you need DATES, call request_dates (one short friendly line allowed).
 - If you need GUESTS, call request_guests.
-- When ready, call create_plan.
+- When destination, dates, and guests are known, call create_plan with a COMPLETE itinerary.
 Rules:
 - After a destination appears, ask the PURPOSE (business, relax, sightseeing, etc.).
+- The plan MUST cover every day of the trip.
+- For each day, create at least 3-5 events (e.g., flight, hotel check-in, transfer, tour, meal, museum visit).
+- Vary the activities. Include transport, accommodation, and leisure.
 - Always give a concrete USD price (no "depends").
 - Rotate images via Unsplash; return direct images.unsplash.com links when possible.
 - Include average weather (°C) for the selected dates when available.
-- Learn preferences over time and use them.
 `;
 
 const toOpenAIMessages = (history=[]) =>
@@ -244,20 +272,13 @@ router.post("/travel", async (req, res) => {
       }
 
       if (slots.destinationKnown && slots.datesKnown && slots.guestsKnown) {
-        const dest = slots.destination;
-        const dates = parseDatesFromHistory(messages);
-        const startISO = dates?.start, endISO = dates?.end;
-        const prettyDates = dates?.pretty || "Your dates";
+        const dest = "Barcelona";
+        const dates = { start: "2024-12-26", end: "2025-01-03", pretty: "26.12.2024 - 03.01.2025" };
 
         const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto=format&fit=crop";
         const image = await pickPhoto(mem, dest, fallbackImg, reqId);
-
-        let weather = null;
-        try {
-          if (startISO && endISO) weather = await getAverageWeather(dest, startISO, endISO, reqId);
-        } catch (e) {
-          logWarn(reqId, "weather_error:", e?.message);
-        }
+        
+        const weather = { temp: 26, icon: 'sunny', country: 'Spain' };
 
         const paxMatch = joined.match(/(\d+)\s*(adult|adults|people|guests)/);
         const kidsMatch = joined.match(/(\d+)\s*(child|children|kids)/);
@@ -265,16 +286,46 @@ router.post("/travel", async (req, res) => {
         const children = kidsMatch ? parseInt(kidsMatch[1],10) : 0;
         const pax = adults + children;
 
-        const className = mem.profile.flight_preferences?.class || "economy";
-        const comfortBias = mem.profile.budget?.prefer_comfort_or_saving || "balanced";
-        const days = startISO && endISO ? daysBetween(startISO, endISO) : 4;
-        const price = `$${priceTrip({ place: dest, days, pax, className, comfortBias }).toLocaleString("en-US")}`;
+        const numDays = daysBetween(dates.start, dates.end);
+        const price = priceTrip({ place: dest, days: numDays, pax, className: "economy", comfortBias: "balanced" });
 
-        const description = `A ${days}-day walking-friendly plan across ${dest} with local highlights. ` +
-          `We’ll tune hotels to your comfort level and include ${mem.profile.liked_activities?.slice(0,2).join(", ") || "top sights"}.`;
+        const description = `A balanced mix of iconic sights, beaches, and authentic local experiences.`;
 
-        const payload = { location: dest, dates: prettyDates, description, image, price, weather: weather ? { tempC: weather.tempC, icon: weather.icon } : undefined };
-        logInfo(reqId, "plan payload prepared");
+        // --- MOCK ITINERARY ---
+        const itinerary = [
+          {
+            date: "2024-12-26",
+            day: "Dec 26",
+            events: [
+              { type: "transport", icon: "car", time: "01:45", duration: "1 hour", title: "Transfer to airport", details: "Full information will be after purchase" },
+              { type: "flight", icon: "airplane", time: "04:45", duration: "3 hour", title: "Flight WZ389", details: "You will go to London, 12 hours waiting" },
+              { type: "flight", icon: "airplane", time: "18:15", duration: "3 hour", title: "Flight WZ345", details: "You will go to Barcelona" },
+              { type: "transport", icon: "car", time: "21:45", duration: "1 hour", title: "Transfer to hotel", details: "Full information will be after purchase" },
+              { type: "accommodation", icon: "bed", time: "22:45", duration: "1 hour", title: "Hotel: Blue Radisson Barcelona", details: "Full information will be after purchase" },
+            ]
+          },
+          {
+            date: "2024-12-27",
+            day: "Dec 27",
+            events: [
+              { type: "meal", icon: "restaurant", time: "09:00", duration: "1.5 hours", title: "Breakfast at Brunch & Cake", details: "Famous local spot for creative dishes." },
+              { type: "tour", icon: "walk", time: "11:00", duration: "3 hours", title: "Gothic Quarter Walking Tour", details: "Explore the historic heart of the city." },
+              { type: "activity", icon: "camera", time: "15:00", duration: "2 hours", title: "Visit La Sagrada Familia", details: "Entry tickets pre-booked." },
+            ]
+          },
+          {
+            date: "2024-12-28",
+            day: "Dec 28",
+            events: [
+              { type: "activity", icon: "camera", time: "10:00", duration: "4 hours", title: "Explore Park Güell", details: "Enjoy Gaudí's whimsical park." },
+              { type: "meal", icon: "restaurant", time: "14:00", duration: "2 hours", title: "Lunch at El Nacional", details: "A beautiful food hall with multiple options." },
+              { type: "activity", icon: "walk", time: "17:00", duration: "3 hours", title: "Stroll down La Rambla", details: "Experience the vibrant street life." },
+            ]
+          }
+        ];
+
+        const payload = { location: dest, country: weather.country, dateRange: dates.pretty, description, image, price, weather, itinerary };
+        logInfo(reqId, "plan payload prepared (mock)");
         return { aiText: "Here’s a tailored draft ✨", signal: { type: "planReady", payload } };
       }
 
@@ -301,7 +352,7 @@ router.post("/travel", async (req, res) => {
 
     try {
       completion = await client.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-4o", // Using a more powerful model for better structured data
         messages: convo,
         tools,
         tool_choice: "auto",
@@ -359,7 +410,6 @@ router.post("/travel", async (req, res) => {
   } catch (err) {
     const tEnd = performance.now?.() ?? Date.now();
     logError(reqId, `handler crashed after ${Math.round(tEnd - tStart)}ms:`, err?.stack || err?.message || err);
-    // last-resort: keep client happy with 200 to avoid "couldn't reach"
     return res.json({ aiText: "Server hiccup — try again in a sec?", signal: null });
   }
 });
