@@ -25,7 +25,7 @@ const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
 const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
 const userMem = new Map();
 
-// ✅ 1. Initialize the full user profile structure
+// Initialize the full user profile structure
 const getMem = (userId) => {
   if (!userMem.has(userId)) {
     userMem.set(userId, {
@@ -47,7 +47,7 @@ const getMem = (userId) => {
   return userMem.get(userId);
 };
 
-// ✅ 2. New function to learn and update user preferences from conversation
+// Learn and update user preferences from conversation
 function updateProfileFromHistory(messages, mem) {
     const userTexts = messages.filter(m => m.role === "user").map(m => m.text).join(" ").toLowerCase();
     const { profile } = mem;
@@ -80,7 +80,7 @@ function updateProfileFromHistory(messages, mem) {
 const cityList = [ "Paris", "London", "Rome", "Barcelona", "Bali", "Tokyo", "New York", "Dubai", "Istanbul", "Amsterdam", "Madrid", "Milan", "Kyoto", "Lisbon", "Prague" ];
 function extractDestination(text = "") {
   const m = text.match(/\b(to|in|for)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)/);
-  if (m) return m[2];
+  if (m) return m;
   for (const city of cityList) { if (new RegExp(`\\b${city}\\b`, "i").test(text)) return city; }
   return null;
 }
@@ -166,7 +166,9 @@ router.post("/travel", async (req, res) => {
         return { aiText: "I'm ready for a new adventure! Where would you like to fly to? 🌍" };
       }
       if (!slots.datesKnown) return { aiText: `Great, ${slots.destination}! Pick your travel dates below 👇`, signal: { type: "dateNeeded" } };
-      if (!slots.guestsKnown) return { aiText: "How many travelers are going? 👇`, signal: { type: "guestsNeeded" } };
+      
+      // ✅ THE FIX: The typo is corrected here. It now correctly uses a double quote at the end.
+      if (!slots.guestsKnown) return { aiText: "How many travelers are going? 👇", signal: { type: "guestsNeeded" } };
       
       const costBreakdown = [ { item: 'Transfer to airport (26.12)', provider: 'GetTransfer', details: 'gettransfer.com', price: 40.00, iconType: 'image', iconValue: 'getTransfer' }, { item: 'Fly Tickets', provider: 'Wizz Air', details: 'Details based on your preferences', price: 125.00, iconType: 'date', iconValue: 'Dec 26' }, { item: 'Hotel', provider: 'Radisson (Family suit)', details: `Style chosen based on your preference for '${mem.profile.budget.prefer_comfort_or_saving}'`, price: 570.00, iconType: 'image', iconValue: 'radisson' }, { item: 'Excursions', provider: 'Get Your Guide', details: 'Activities based on your interests', price: 250.00, iconType: 'image', iconValue: 'getYourGuide' }, { item: 'Insurance', provider: 'Axa Schengen', details: 'axa-schengen.com', price: 40.00, iconType: 'image', iconValue: 'axa' } ];
       const totalPrice = costBreakdown.reduce((sum, item) => sum + item.price, 0);
@@ -180,7 +182,6 @@ router.post("/travel", async (req, res) => {
         return res.json(await runSlotFlow());
     }
     
-    // The system prompt is now dynamic based on the user's profile
     const systemPrompt = getSystemPrompt(mem.profile);
     const convo = [{ role: "system", content: systemPrompt }, ...toOpenAIMessages(messages)];
 
@@ -193,7 +194,7 @@ router.post("/travel", async (req, res) => {
             temperature: 0.5,
         });
 
-        const toolCall = completion?.choices?.[0]?.message?.tool_calls?.[0];
+        const toolCall = completion?.choices?.?.message?.tool_calls?.;
         if (toolCall) {
             const functionName = toolCall.function.name;
             const args = JSON.parse(toolCall.function.arguments);
