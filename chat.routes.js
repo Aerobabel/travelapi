@@ -155,7 +155,6 @@ router.post("/travel", async (req, res) => {
 
     updateProfileFromHistory(messages, mem);
     
-    // This is now purely a fallback for when the OpenAI call fails or is not available.
     const runFallbackFlow = async () => {
       const slots = deriveSlots(messages);
       logInfo(reqId, "Running fallback flow. Slots:", slots);
@@ -189,7 +188,15 @@ router.post("/travel", async (req, res) => {
         if (toolCall) {
             const functionName = toolCall.function.name;
             logInfo(reqId, `AI called tool: ${functionName}`);
-            const args = JSON.parse(toolCall.function.arguments);
+            
+            // Defensive parsing of arguments
+            let args = {};
+            try {
+                args = JSON.parse(toolCall.function.arguments);
+            } catch(e) {
+                logError(reqId, 'Failed to parse AI arguments, using fallback.', e);
+                return res.json(await runFallbackFlow());
+            }
 
             if (functionName === "create_plan") {
                 args.image = await pickPhoto(args.location, reqId);
