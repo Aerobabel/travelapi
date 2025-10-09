@@ -211,6 +211,7 @@ Rules:
 - For each day, create at least 3-5 events (e.g., flight, hotel check-in, transfer, tour, meal, museum visit).
 - Vary the activities. Include transport, accommodation, and leisure.
 - Always give a concrete USD price (no "depends").
+- For the weather icon, use one of these exact strings: "sunny", "partly-sunny", "cloudy", "rainy", "snow". DO NOT use emojis.
 - Rotate images via Unsplash; return direct images.unsplash.com links when possible.
 - Include average weather (°C) for the selected dates when available.
 `;
@@ -275,7 +276,7 @@ router.post("/travel", async (req, res) => {
         const dest = "Barcelona";
         const dates = { start: "2024-12-26", end: "2025-01-03", pretty: "26.12.2024 - 03.01.2025" };
 
-        const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto=format&fit=crop";
+        const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto-format&fit=crop";
         const image = await pickPhoto(mem, dest, fallbackImg, reqId);
         
         const weather = { temp: 26, icon: 'sunny', country: 'Spain' };
@@ -352,7 +353,7 @@ router.post("/travel", async (req, res) => {
 
     try {
       completion = await client.chat.completions.create({
-        model: "gpt-4o", // Using a more powerful model for better structured data
+        model: "gpt-4o",
         messages: convo,
         tools,
         tool_choice: "auto",
@@ -386,9 +387,30 @@ router.post("/travel", async (req, res) => {
         if (!aiText) aiText = "Awesome — how many are traveling? 👇";
       } else if (name === "create_plan") {
         if (args?.image && /source\.unsplash\.com/.test(args.image)) {
-          const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto=format&fit=crop";
+          const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto-format&fit=crop";
           args.image = await resolveUnsplashDirect(args.image, fallbackImg, reqId);
         }
+
+        // ✅ START OF THE FIX: Sanitize the weather icon from the AI
+        if (args.weather && args.weather.icon) {
+          const icon = args.weather.icon.toLowerCase();
+          if (icon.includes('☀️') || icon.includes('sunny')) {
+            args.weather.icon = 'sunny';
+          } else if (icon.includes('⛅️') || icon.includes('partly-sunny')) {
+            args.weather.icon = 'partly-sunny';
+          } else if (icon.includes('☁️') || icon.includes('cloud')) {
+            args.weather.icon = 'cloudy';
+          } else if (icon.includes('🌧️') || icon.includes('rain')) {
+            args.weather.icon = 'rainy';
+          } else if (icon.includes('❄️') || icon.includes('snow')) {
+            args.weather.icon = 'snow';
+          } else {
+            // If it's something unexpected, default to "sunny"
+            args.weather.icon = 'sunny';
+          }
+        }
+        // ✅ END OF THE FIX
+
         signal = { type: "planReady", payload: args };
         if (!aiText) aiText = "Here’s your plan ✨";
       }
