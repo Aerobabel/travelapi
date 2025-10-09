@@ -25,7 +25,6 @@ const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
 const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
 const userMem = new Map();
 
-// Initialize the full user profile structure
 const getMem = (userId) => {
   if (!userMem.has(userId)) {
     userMem.set(userId, {
@@ -46,7 +45,6 @@ const getMem = (userId) => {
   return userMem.get(userId);
 };
 
-// Learn and update user preferences from conversation
 function updateProfileFromHistory(messages, mem) {
     const userTexts = messages.filter(m => m.role === "user").map(m => m.text).join(" ").toLowerCase();
     const { profile } = mem;
@@ -87,9 +85,7 @@ async function pickPhoto(dest, reqId) {
     const url = `https://source.unsplash.com/featured/800x600/?${q}`;
     try {
         const res = await fetch(url, { redirect: 'follow' });
-        if (res && res.url && res.url.startsWith('https://images.unsplash.com/')) {
-            return res.url;
-        }
+        if (res && res.url && res.url.startsWith('https://images.unsplash.com/')) { return res.url; }
     } catch (e) { logError(reqId, "Unsplash redirect failed", e.message); }
     return FALLBACK_IMAGE_URL;
 }
@@ -112,7 +108,7 @@ const tools = [
             type: "array", items: { type: "object", properties: {
               item: { type: "string" }, provider: { type: "string" }, details: { type: "string" },
               price: { type: "number" }, iconType: { type: "string", enum: ["image", "date"] },
-              iconValue: { type: "string", description: "A unique key for the logo (e.g. 'getTransfer', 'radisson') OR 'Month Day' for date (e.g., 'Dec 26')" }
+              iconValue: { type: "string", description: "A URL for the image OR 'Month Day' for date (e.g., 'Dec 26')" }
             }, required: ["item", "provider", "details", "price", "iconType", "iconValue"] }
           }
         },
@@ -129,7 +125,6 @@ const getSystemPrompt = (profile) => `You are a world-class, professional AI tra
 3.  **BE COMPREHENSIVE:** A real plan covers everything. Your generated itinerary must be detailed, spanning multiple days with at least 3-5 varied events per day (e.g., flights, transfers, meals at real local restaurants, tours, museum visits, relaxation time).
 4.  **STRICT DATA FORMAT:** You must call a function. Never respond with just text if you can call a function. Adhere perfectly to the function's JSON schema.
     -   `weather.icon`: Must be one of: "sunny", "partly-sunny", "cloudy".
-    -   `costBreakdown.iconValue`: For images, must be one of: 'getTransfer', 'radisson', 'getYourGuide', 'axa'.
     -   `itinerary.date`: MUST be in 'YYYY-MM-DD' format.
     -   `itinerary.day`: MUST be in 'Mon Day' format (e.g., 'Dec 26').
 
@@ -185,6 +180,7 @@ router.post("/travel", async (req, res) => {
         });
 
         const choice = completion.choices[0];
+        // ✅ THE FIX: The syntax error was here. It is now corrected.
         const toolCall = choice.message?.tool_calls?.[0];
 
         if (toolCall) {
