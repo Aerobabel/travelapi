@@ -25,7 +25,6 @@ const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
 const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
 const userMem = new Map();
 
-// Initialize the full user profile structure
 const getMem = (userId) => {
   if (!userMem.has(userId)) {
     userMem.set(userId, {
@@ -46,7 +45,6 @@ const getMem = (userId) => {
   return userMem.get(userId);
 };
 
-// Learn and update user preferences from conversation
 function updateProfileFromHistory(messages, mem) {
     const userTexts = messages.filter(m => m.role === "user").map(m => m.text).join(" ").toLowerCase();
     const { profile } = mem;
@@ -87,9 +85,7 @@ async function pickPhoto(dest, reqId) {
     const url = `https://source.unsplash.com/featured/800x600/?${q}`;
     try {
         const res = await fetch(url, { redirect: 'follow' });
-        if (res && res.url && res.url.startsWith('https://images.unsplash.com/')) {
-            return res.url;
-        }
+        if (res && res.url && res.url.startsWith('https://images.unsplash.com/')) { return res.url; }
     } catch (e) { logError(reqId, "Unsplash redirect failed", e.message); }
     return FALLBACK_IMAGE_URL;
 }
@@ -189,7 +185,6 @@ router.post("/travel", async (req, res) => {
             const functionName = toolCall.function.name;
             logInfo(reqId, `AI called tool: ${functionName}`);
             
-            // Defensive parsing of arguments
             let args = {};
             try {
                 args = JSON.parse(toolCall.function.arguments);
