@@ -1,15 +1,26 @@
 // server/chat.routes.js
-// Use with: app.use("/chat", chatRouter)  → POST /chat/travel
+// Mount with: app.use("/chat", chatRouter)  → POST /chat/travel
+
 import { Router } from "express";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 
+// --- ensure envs
 dotenv.config();
 
-const router = Router();
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// --- fetch polyfill for Node < 18 (Render sometimes uses older Node)
+let _fetch = globalThis.fetch;
+if (typeof _fetch !== "function") {
+  const nodeFetch = (await import("node-fetch")).default;
+  _fetch = nodeFetch;
+  globalThis.fetch = nodeFetch;
+}
 
-// ---- memory ----
+const router = Router();
+const hasKey = !!process.env.OPENAI_API_KEY;
+const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+
+/* ------------------------------ Memory ------------------------------ */
 const userMem = new Map();
 const getMem = (userId) => {
   if (!userMem.has(userId)) {
@@ -32,7 +43,7 @@ const getMem = (userId) => {
   return userMem.get(userId);
 };
 
-// ---- utils ----
+/* ------------------------------- Utils ------------------------------- */
 const cityList = [
   "Paris","London","Rome","Barcelona","Bali","Tokyo","New York","Dubai",
   "Istanbul","Amsterdam","Madrid","Milan","Kyoto","Lisbon","Prague"
@@ -43,6 +54,17 @@ function extractDestination(text = "") {
   if (m) return m[2];
   for (const city of cityList) if (new RegExp(`\\b${city}\\b`, "i").test(text)) return city;
   return null;
+}
+
+// Resolve Unsplash "Source" redirect to a direct CDN URL
+async function resolveUnsplashDirect(url, fallback) {
+  try {
+    const res = await _fetch(url, { redirect: "follow" });
+    if (res && res.url && /^https:\/\/images\.unsplash\.com\//.test(res.url)) {
+      return res.url;
+    }
+  } catch (_) {}
+  return fallback;
 }
 
 function buildPhotoList(place, count = 6) {
@@ -58,22 +80,23 @@ function buildPhotoList(place, count = 6) {
   return list;
 }
 
-function pickPhoto(mem, dest, fallback) {
+async function pickPhoto(mem, dest, fallback) {
   if (mem.lastDest !== dest) {
     mem.lastDest = dest;
     mem.lastPhotos = buildPhotoList(dest, 6);
   }
-  const url = mem.lastPhotos.shift();
+  let url = mem.lastPhotos.shift();
   if (!url) {
     mem.lastPhotos = buildPhotoList(dest, 6);
-    return mem.lastPhotos.shift() || fallback;
+    url = mem.lastPhotos.shift() || fallback;
   }
-  return url || fallback;
+  // Resolve to direct CDN (avoids RN redirect issues)
+  return await resolveUnsplashDirect(url, fallback);
 }
 
 async function geocodePlace(place) {
   const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place)}&count=1`;
-  const r = await fetch(url);
+  const r = await _fetch(url);
   if (!r.ok) throw new Error(`geocode failed ${r.status}`);
   const j = await r.json();
   const hit = j?.results?.[0];
@@ -96,7 +119,7 @@ async function getAverageWeather(place, startISO, endISO) {
   const geo = await geocodePlace(place);
   if (!geo) return null;
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${geo.lat}&longitude=${geo.lon}&daily=temperature_2m_max,temperature_2m_min&start_date=${startISO}&end_date=${endISO}&timezone=UTC`;
-  const r = await fetch(url);
+  const r = await _fetch(url);
   if (!r.ok) throw new Error(`weather failed ${r.status}`);
   const j = await r.json();
   const max = j?.daily?.temperature_2m_max || [];
@@ -121,7 +144,7 @@ function priceTrip({ place, days, pax, className, comfortBias }) {
   return Math.round(total / 10) * 10;
 }
 
-// ---- tools ----
+/* ------------------------------ Tools/LLM ----------------------------- */
 const tools = [
   {
     type: "function",
@@ -169,12 +192,11 @@ UI:
 Rules:
 - After a destination appears, ask the PURPOSE (business, relax, sightseeing, etc.).
 - Always give a concrete USD price (no "depends").
-- Rotate images via source.unsplash.com with varying sig values.
+- Rotate images via Unsplash; provide direct images.unsplash.com links when possible.
 - Include average weather (°C) for the selected dates when available.
 - Learn preferences over time and use them.
 `;
 
-// ---- helpers ----
 function toOpenAIMessages(history = []) {
   return history.map(m =>
     m.role === "user" ? { role: "user", content: m.text }
@@ -200,15 +222,11 @@ function deriveSlots(history = []) {
   return { destinationKnown, destination, datesKnown, guestsKnown, purposeKnown };
 }
 
-/* ------------------------------ ROUTE ------------------------------ */
-// IMPORTANT: route is "/travel" (not "/chat/travel") since we mount with app.use("/chat", chatRouter)
+/* -------------------------------- Route -------------------------------- */
+// IMPORTANT: path is "/travel" (we mount at "/chat")
 router.post("/travel", async (req, res) => {
   try {
     const { messages = [], userId = "anonymous" } = req.body || {};
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "missing_key", message: "OPENAI_API_KEY missing" });
-    }
-
     const mem = getMem(userId);
     const joined = messages.filter(m => m.role === "user").map(m => m.text).join("\n").toLowerCase();
 
@@ -218,6 +236,87 @@ router.post("/travel", async (req, res) => {
       if (act && !mem.profile.liked_activities.includes(act[0])) mem.profile.liked_activities.push(act[0]);
     }
 
+    // If no key, run the same slot logic and return a mock, so the client UX works
+    const runSlotFlow = async () => {
+      let aiText = "";
+      let signal = null;
+
+      const slots = deriveSlots(messages);
+
+      // Ask purpose once after destination is known
+      if (!signal && slots.destinationKnown && !slots.purposeKnown) {
+        aiText =
+          `Nice choice — ${slots.destination}! Is this more of a business trip, a relaxing getaway, or sightseeing/photography?`;
+        return { aiText, signal: null };
+      }
+      if (!signal && slots.destinationKnown && !slots.datesKnown) {
+        return { aiText: "Great — pick your travel dates below 👇", signal: { type: "dateNeeded" } };
+      }
+      if (!signal && slots.destinationKnown && slots.datesKnown && !slots.guestsKnown) {
+        return {
+          aiText: "How many travelers are going? 👇",
+          signal: { type: "guestsNeeded", payload: { minInfo: "adults and children" } }
+        };
+      }
+
+      // Ready to create a plan
+      if (slots.destinationKnown && slots.datesKnown && slots.guestsKnown) {
+        const dest = slots.destination;
+        const dates = parseDatesFromHistory(messages);
+        const startISO = dates?.start, endISO = dates?.end;
+        const prettyDates = dates?.pretty || "Your dates";
+
+        const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto=format&fit=crop";
+        const image = await pickPhoto(mem, dest, fallbackImg);
+
+        let weather = null;
+        try {
+          if (startISO && endISO) weather = await getAverageWeather(dest, startISO, endISO);
+        } catch (e) {
+          console.warn("weather_error", e?.message);
+        }
+
+        const paxMatch = joined.match(/(\d+)\s*(adult|adults|people|guests)/);
+        const kidsMatch = joined.match(/(\d+)\s*(child|children|kids)/);
+        const adults = paxMatch ? parseInt(paxMatch[1], 10) : 1;
+        const children = kidsMatch ? parseInt(kidsMatch[1], 10) : 0;
+        const pax = adults + children;
+
+        const className = mem.profile.flight_preferences?.class || "economy";
+        const comfortBias = mem.profile.budget?.prefer_comfort_or_saving || "balanced";
+        const days = startISO && endISO ? daysBetween(startISO, endISO) : 4;
+        const amount = priceTrip({ place: dest, days, pax, className, comfortBias });
+        const price = `$${amount.toLocaleString("en-US")}`;
+
+        const description =
+          `A ${days}-day walking-friendly plan across ${dest} with local highlights. ` +
+          `We’ll tune hotels to your comfort level and include ${mem.profile.liked_activities?.slice(0,2).join(", ") || "top sights"}.`;
+
+        return {
+          aiText: "Here’s a tailored draft ✨",
+          signal: {
+            type: "planReady",
+            payload: {
+              location: dest,
+              dates: prettyDates,
+              description,
+              image,
+              price,
+              weather: weather ? { tempC: weather.tempC, icon: weather.icon } : undefined,
+            },
+          },
+        };
+      }
+
+      return { aiText: "Tell me where you’d like to fly 🌍", signal: null };
+    };
+
+    if (!hasKey) {
+      const out = await runSlotFlow();
+      return res.json(out);
+    }
+
+    // --- OpenAI path (same behavior you had)
     const convo = [{ role: "system", content: SYSTEM }, ...toOpenAIMessages(messages)];
     const completion = await client.chat.completions.create({
       model: "gpt-4o-mini",
@@ -242,78 +341,26 @@ router.post("/travel", async (req, res) => {
         signal = { type: "guestsNeeded", payload: args };
         if (!aiText) aiText = "Awesome — how many are traveling? 👇";
       } else if (name === "create_plan") {
+        // ensure image is direct URL if model provided one using source.unsplash.com
+        if (args?.image && /source\.unsplash\.com/.test(args.image)) {
+          const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto=format&fit=crop";
+          args.image = await resolveUnsplashDirect(args.image, fallbackImg);
+        }
         signal = { type: "planReady", payload: args };
         if (!aiText) aiText = "Here’s your plan ✨";
       }
     }
 
-    const slots = deriveSlots(messages);
-
-    // Ask purpose once after destination is known
-    if (!signal && slots.destinationKnown && !slots.purposeKnown) {
-      aiText =
-        aiText ||
-        `Nice choice — ${slots.destination}! Is this more of a business trip, a relaxing getaway, or sightseeing/photography?`;
-      return res.json({ aiText, signal: null });
-    }
-
-    if (!signal && slots.destinationKnown && !slots.datesKnown) {
-      signal = { type: "dateNeeded" };
-      aiText = aiText || "Great — pick your travel dates below 👇";
-    }
-    if (!signal && slots.destinationKnown && slots.datesKnown && !slots.guestsKnown) {
-      signal = { type: "guestsNeeded", payload: { minInfo: "adults and children" } };
-      aiText = aiText || "How many travelers are going? 👇";
-    }
-
-    if (!signal && slots.destinationKnown && slots.datesKnown && slots.guestsKnown) {
-      const dest = slots.destination;
-      const dates = parseDatesFromHistory(messages);
-      const startISO = dates?.start, endISO = dates?.end;
-      const prettyDates = dates?.pretty || "Your dates";
-
-      const fallbackImg = "https://images.unsplash.com/photo-1543342384-1bbd4b285d05?q=80&w=1600&auto=format&fit=crop";
-      const image = pickPhoto(mem, dest, fallbackImg);
-
-      let weather = null;
-      try {
-        if (startISO && endISO) weather = await getAverageWeather(dest, startISO, endISO);
-      } catch (e) {
-        console.warn("weather_error", e?.message);
-      }
-
-      const paxMatch = joined.match(/(\d+)\s*(adult|adults|people|guests)/);
-      const kidsMatch = joined.match(/(\d+)\s*(child|children|kids)/);
-      const adults = paxMatch ? parseInt(paxMatch[1], 10) : 1;
-      const children = kidsMatch ? parseInt(kidsMatch[1], 10) : 0;
-      const pax = adults + children;
-
-      const className = mem.profile.flight_preferences?.class || "economy";
-      const comfortBias = mem.profile.budget?.prefer_comfort_or_saving || "balanced";
-      const days = startISO && endISO ? daysBetween(startISO, endISO) : 4;
-      const amount = priceTrip({ place: dest, days, pax, className, comfortBias });
-      const price = `$${amount.toLocaleString("en-US")}`;
-
-      const description =
-        `A ${days}-day walking-friendly plan across ${dest} with local highlights. ` +
-        `We’ll tune hotels to your comfort level and include ${mem.profile.liked_activities?.slice(0,2).join(", ") || "top sights"}.`;
-
-      signal = {
-        type: "planReady",
-        payload: {
-          location: dest,
-          dates: prettyDates,
-          description,
-          image,
-          price,
-          weather: weather ? { tempC: weather.tempC, icon: weather.icon } : undefined,
-        },
-      };
-      aiText = aiText || "Here’s a tailored draft ✨";
+    // Slot-based guidance if model didn't choose a tool
+    if (!signal) {
+      const out = await runSlotFlow();
+      aiText = aiText || out.aiText;
+      signal = out.signal;
     }
 
     if (!signal && !aiText) aiText = "Tell me where you’d like to fly 🌍";
     return res.json({ aiText, signal });
+
   } catch (err) {
     console.error("chat_failed:", err);
     return res.status(500).json({ error: "chat_failed", message: err?.message || "Unknown error" });
