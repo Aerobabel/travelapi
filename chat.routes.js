@@ -94,9 +94,33 @@ async function pickPhoto(dest, reqId) {
     return FALLBACK_IMAGE_URL;
 }
 
-const tools = [ /* Tools remain unchanged from previous correct version */ ];
+const tools = [
+  { type: "function", function: { name: "request_dates", description: "Need travel dates.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "request_guests", description: "Need traveler counts.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: {
+      name: "create_plan",
+      description: "Return a full, detailed, day-by-day travel plan with a cost breakdown when destination, dates, and guests are known.",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string" }, country: { type: "string" },
+          dateRange: { type: "string" }, description: { type: "string" },
+          image: { type: "string" }, price: { type: "number" },
+          weather: { type: "object", properties: { temp: { type: "number" }, icon: { type: "string" } } },
+          itinerary: { type: "array", items: { type: "object", properties: { date: { type: "string" }, day: { type: "string" }, events: { type: "array", items: { type: "object", properties: { type: { type: "string" }, icon: { type: "string" }, time: { type: "string" }, duration: { type: "string" }, title: { type: "string" }, details: { type: "string" } }, required: ["type", "icon", "time", "duration", "title", "details"] } } }, required: ["date", "day", "events"] } },
+          costBreakdown: {
+            type: "array", items: { type: "object", properties: {
+              item: { type: "string" }, provider: { type: "string" }, details: { type: "string" },
+              price: { type: "number" }, iconType: { type: "string", enum: ["image", "date"] },
+              iconValue: { type: "string", description: "A unique key for the logo (e.g. 'getTransfer', 'radisson') OR 'Month Day' for date (e.g., 'Dec 26')" }
+            }, required: ["item", "provider", "details", "price", "iconType", "iconValue"] }
+          }
+        },
+        required: ["location", "country", "dateRange", "description", "image", "price", "itinerary", "costBreakdown"],
+      },
+  } }
+];
 
-// ✅ A much more detailed and professional system prompt
 const getSystemPrompt = (profile) => `You are a world-class, professional AI travel agent. Your goal is to create inspiring, comprehensive, and highly personalized travel plans.
 
 **CRITICAL RULES:**
@@ -134,12 +158,13 @@ router.post("/travel", async (req, res) => {
     // This is now purely a fallback for when the OpenAI call fails or is not available.
     const runFallbackFlow = async () => {
       const slots = deriveSlots(messages);
+      logInfo(reqId, "Running fallback flow. Slots:", slots);
       if (!slots.destinationKnown) return { aiText: "Where would you like to go on your next adventure?" };
       if (!slots.datesKnown) return { aiText: `Sounds exciting! When would you like to go to ${slots.destination}?`, signal: { type: "dateNeeded" } };
       if (!slots.guestsKnown) return { aiText: "And how many people will be traveling?", signal: { type: "guestsNeeded" } };
       
-      const payload = { location: slots.destination, country: 'Unavailable', dateRange: 'N/A', description: 'This is a fallback plan. Please try again to get a personalized itinerary.', image: await pickPhoto(slots.destination, reqId), price: 0, itinerary: [], costBreakdown: [] };
-      return { aiText: "The AI planner is currently unavailable, but here is a basic outline.", signal: { type: "planReady", payload } };
+      const payload = { location: slots.destination, country: 'Unavailable', dateRange: 'N/A', description: 'This is a fallback plan. The AI planner is currently unavailable.', image: await pickPhoto(slots.destination, reqId), price: 0, itinerary: [], costBreakdown: [] };
+      return { aiText: "The AI planner is temporarily unavailable, but here is a basic outline.", signal: { type: "planReady", payload } };
     };
 
     if (!hasKey) {
@@ -163,11 +188,10 @@ router.post("/travel", async (req, res) => {
 
         if (toolCall) {
             const functionName = toolCall.function.name;
-            const args = JSON.parse(toolCall.function.arguments);
             logInfo(reqId, `AI called tool: ${functionName}`);
+            const args = JSON.parse(toolCall.function.arguments);
 
             if (functionName === "create_plan") {
-                // Sanitize image and weather data just in case
                 args.image = await pickPhoto(args.location, reqId);
                 if (args.weather && !["sunny", "partly-sunny", "cloudy"].includes(args.weather.icon)) {
                     args.weather.icon = "sunny";
@@ -182,12 +206,11 @@ router.post("/travel", async (req, res) => {
             }
         }
         
-        // If the AI responds with text instead of a tool call
         if (choice.message.content) {
             return res.json({ aiText: choice.message.content });
         }
 
-        // Final fallback if the response is empty
+        logInfo(reqId, "AI did not call a tool or return text. Using fallback.");
         return res.json(await runFallbackFlow());
 
     } catch (e) {
@@ -197,7 +220,6 @@ router.post("/travel", async (req, res) => {
     
   } catch (err) {
     logError(reqId, `Critical handler error:`, err);
-    // This is the server's guarantee: always return a valid JSON response.
     return res.status(500).json({ aiText: "A critical server error occurred. Please try again." });
   }
 });
