@@ -25,6 +25,7 @@ const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
 const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
 const userMem = new Map();
 
+// Initialize the full user profile structure
 const getMem = (userId) => {
   if (!userMem.has(userId)) {
     userMem.set(userId, {
@@ -45,6 +46,7 @@ const getMem = (userId) => {
   return userMem.get(userId);
 };
 
+// Learn and update user preferences from conversation
 function updateProfileFromHistory(messages, mem) {
     const userTexts = messages.filter(m => m.role === "user").map(m => m.text).join(" ").toLowerCase();
     const { profile } = mem;
@@ -85,7 +87,9 @@ async function pickPhoto(dest, reqId) {
     const url = `https://source.unsplash.com/featured/800x600/?${q}`;
     try {
         const res = await fetch(url, { redirect: 'follow' });
-        if (res && res.url && res.url.startsWith('https://images.unsplash.com/')) { return res.url; }
+        if (res && res.url && res.url.startsWith('https://images.unsplash.com/')) {
+            return res.url;
+        }
     } catch (e) { logError(reqId, "Unsplash redirect failed", e.message); }
     return FALLBACK_IMAGE_URL;
 }
@@ -103,7 +107,7 @@ const tools = [
           dateRange: { type: "string" }, description: { type: "string" },
           image: { type: "string" }, price: { type: "number" },
           weather: { type: "object", properties: { temp: { type: "number" }, icon: { type: "string" } } },
-          itinerary: { type: "array", items: { type: "object", properties: { date: { type: "string" }, day: { type: "string" }, events: { type: "array", items: { type: "object", properties: { type: { type: "string" }, icon: { type: "string" }, time: { type: "string" }, duration: { type: "string" }, title: { type: "string" }, details: { type: "string" } }, required: ["type", "icon", "time", "duration", "title", "details"] } } }, required: ["date", "day", "events"] } },
+          itinerary: { type: "array", items: { type: "object", properties: { date: { type: "string", description: "YYYY-MM-DD" }, day: { type: "string", description: "e.g., Dec 26" }, events: { type: "array", items: { type: "object", properties: { type: { type: "string" }, icon: { type: "string" }, time: { type: "string" }, duration: { type: "string" }, title: { type: "string" }, details: { type: "string" } }, required: ["type", "icon", "time", "duration", "title", "details"] } } }, required: ["date", "day", "events"] } },
           costBreakdown: {
             type: "array", items: { type: "object", properties: {
               item: { type: "string" }, provider: { type: "string" }, details: { type: "string" },
@@ -126,6 +130,8 @@ const getSystemPrompt = (profile) => `You are a world-class, professional AI tra
 4.  **STRICT DATA FORMAT:** You must call a function. Never respond with just text if you can call a function. Adhere perfectly to the function's JSON schema.
     -   `weather.icon`: Must be one of: "sunny", "partly-sunny", "cloudy".
     -   `costBreakdown.iconValue`: For images, must be one of: 'getTransfer', 'radisson', 'getYourGuide', 'axa'.
+    -   `itinerary.date`: MUST be in 'YYYY-MM-DD' format.
+    -   `itinerary.day`: MUST be in 'Mon Day' format (e.g., 'Dec 26').
 
 **USER PROFILE:**
 ${JSON.stringify(profile, null, 2)}
