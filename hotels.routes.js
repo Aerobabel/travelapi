@@ -1,94 +1,20 @@
 // hotels.routes.js
 import { Router } from "express";
+import Amadeus from "amadeus";
 
 const router = Router();
 
-// --- DATA (same as your last working single-file server) ---
-const DESTS = [
-  { name: "Budapest", country: "Hungary" },
-  { name: "Buenos Aires", country: "Argentina" },
-  { name: "Bucharest", country: "Romania" },
-  { name: "Buraydah", country: "Saudi Arabia" },
-  { name: "Bursa", country: "Turkey" },
-  { name: "Bulgaria", country: "" },
-  { name: "Berlin", country: "Germany" },
-  { name: "Milan", country: "Italy" },
-  { name: "Manchester City", country: "UK" },
-  { name: "Seychelles", country: "" },
-  { name: "Cape Town", country: "South Africa" },
-  { name: "Barcelona", country: "Spain" }
-];
+// ---------------------------
+// Amadeus client
+// ---------------------------
+const amadeus = new Amadeus({
+  clientId: process.env.AMADEUS_CLIENT_ID,
+  clientSecret: process.env.AMADEUS_CLIENT_SECRET,
+});
 
-const HOTELS = [
-  {
-    id: "1",
-    title: "Taksim The Capital Cordon Hotel",
-    price: 120,
-    rating: 4.8,
-    tags: ["Deal", "Popular"],
-    distance: "2.4 km from center",
-    perks: ["Free Wi-Fi", "Breakfast", "No hidden fees"],
-    img: "https://images.unsplash.com/photo-1551776235-dde6d4829808?q=80&w=1200&auto=format&fit=crop",
-    city: "Istanbul"
-  },
-  {
-    id: "2",
-    title: "Ultra House",
-    price: 520,
-    rating: 4.6,
-    tags: ["New"],
-    distance: "900 m from center",
-    perks: ["Pool", "Gym", "Free cancellation"],
-    img: "https://images.unsplash.com/photo-1551880237-6e72491e3415?q=80&w=1200&auto=format&fit=crop",
-    city: "Paris"
-  },
-  {
-    id: "3",
-    title: "Radisson Blu Hotel",
-    price: 350,
-    rating: 4.7,
-    tags: ["Popular"],
-    distance: "3.1 km from center",
-    perks: ["Restaurant", "Spa", "No hidden fees"],
-    img: "https://images.unsplash.com/photo-1560448075-bb4caa6c8df5?q=80&w=1200&auto=format&fit=crop",
-    city: "Paris"
-  }
-];
-
-const NEARBY = [
-  {
-    id: "n1",
-    title: "Radison Blu Hotel",
-    img: "https://images.unsplash.com/photo-1560448075-bb4caa6c8df5?q=80&w=1200&auto=format&fit=crop",
-    price: 250,
-    nights: "1 day, 1 guest",
-    distance: "6.9 km from the center of the city",
-    score: "9.6",
-    scoreText: "Exceptional (2522 reviews)",
-    badge: "Guest Favourite"
-  },
-  {
-    id: "n2",
-    title: "Club Travel Hotel",
-    img: "https://images.unsplash.com/photo-1551880237-6e72491e3415?q=80&w=1200&auto=format&fit=crop",
-    price: 500,
-    nights: "1 day, 1 guest",
-    distance: "1.9 km from the center of the city",
-    score: "9.0",
-    scoreText: "Excellent (1801 reviews)",
-    badge: "Guest Favourite"
-  }
-];
-
-const LUX = [
-  {
-    id: "l1",
-    title: "Hotel Pari Cherie",
-    city: "Paris, France",
-    img: "https://images.unsplash.com/photo-1542314831-068cd1dbfeeb?q=80&w=1200&auto=format&fit=crop"
-  }
-];
-
+// ---------------------------
+// Helpers
+// ---------------------------
 const nightsBetween = (a, b) => {
   if (!a || !b) return 0;
   const A = new Date(a);
@@ -96,94 +22,281 @@ const nightsBetween = (a, b) => {
   return Math.max(0, Math.round((B - A) / 86400000));
 };
 
-// ---- ROUTES ----
+// Basic fallback image if the API doesn't provide media (Self-Service Hotel APIs don't include images)
+const fallbackImg = (seed = "hotel") =>
+  `https://images.unsplash.com/photo-1551776235-dde6d4829808?q=80&w=1200&auto=format&fit=crop&sig=${encodeURIComponent(
+    seed
+  )}`;
 
-// Typeahead destinations
-router.get("/destinations", (req, res) => {
-  const q = (req.query.q || "").toString().trim().toLowerCase();
-  if (!q) return res.json([]);
-  res.json(DESTS.filter(d => d.name.toLowerCase().startsWith(q)));
-});
+// Map Amadeus hotel offer → your frontend Hotel card
+const mapOfferToHotelCard = (offerItem) => {
+  const hotel = offerItem.hotel || {};
+  const firstOffer = (offerItem.offers && offerItem.offers[0]) || {};
+  const priceTotal = Number(firstOffer.price?.total ?? firstOffer.price?.base ?? 0);
 
-// Showcase sections
-router.get("/showcase", (_req, res) => {
-  res.json({ nearby: NEARBY, luxury: LUX });
-});
+  return {
+    id: hotel.hotelId || String(Math.random()),
+    title: hotel.name || "Hotel",
+    price: priceTotal || 0, // total stay price when dates provided; otherwise 0 (front-end still renders)
+    rating: hotel.rating ? Number(hotel.rating) : 0,
+    tags: [], // Amadeus doesn't expose marketing tags in Self-Service; keep empty
+    distance:
+      hotel.distance?.value && hotel.distance?.unit
+        ? `${hotel.distance.value} ${hotel.distance.unit.toLowerCase()} from center`
+        : "—",
+    perks: ["Free Wi-Fi", "No hidden fees"], // simple defaults; enrich per policy if desired
+    img: fallbackImg(hotel.name),
+    city: hotel.cityCode || "",
+  };
+};
 
-// Hotels search
-router.get("/hotels", (req, res) => {
-  const { destination = "", sort = "Recommended" } = req.query;
-  const dest = destination.toString().trim().toLowerCase();
+// Map Amadeus room offer → your frontend Room card
+const mapOfferToRoom = (offer, nights) => {
+  const desc = offer.room?.description?.text || "";
+  const type = offer.room?.typeEstimated || {};
+  const beds =
+    type.beds && type.bedType
+      ? `${type.beds} ${String(type.bedType).toLowerCase()} bed${type.beds > 1 ? "s" : ""}`
+      : desc || "Room";
 
-  let results = HOTELS.filter(h =>
-    dest ? (h.city || "").toLowerCase().includes(dest) : true
-  );
+  // Amadeus price.total is for the whole stay; convert to per-night for your UI
+  const total = Number(offer.price?.total || 0);
+  const perNight = nights > 0 ? Math.round(total / nights) : total;
 
-  switch (sort) {
-    case "Cheapest":
-      results = [...results].sort((a, b) => a.price - b.price);
-      break;
-    case "Higher rating":
-      results = [...results].sort((a, b) => b.rating - a.rating);
-      break;
-    case "Newest listings":
-      results = [...results].sort((a, b) => Number(b.id) - Number(a.id));
-      break;
-    case "Closest to city center": {
-      const km = s => {
-        const m = /([0-9.]+)\s*km/i.exec(s);
-        return m ? Number(m[1]) : 9999;
-      };
-      results = [...results].sort((a, b) => km(a.distance) - km(b.distance));
-      break;
-    }
-    default:
-      break;
+  const tags = [];
+  if (offer.policies?.cancellations?.length) tags.push("Free cancellation");
+  if (offer.boardType) tags.push(offer.boardType); // e.g., "BREAKFAST"
+
+  const perks = ["No hidden fees"];
+  if (offer.room?.typeEstimated?.category) perks.push(offer.room.typeEstimated.category);
+  if (offer.room?.type) perks.push(offer.room.type);
+
+  return {
+    id: offer.id || Math.random().toString(36).slice(2),
+    name: offer.room?.name || "Room",
+    bed: beds,
+    img: fallbackImg(offer.room?.name || "room"),
+    price: perNight, // per night (your UI expects this)
+    tags,
+    perks,
+  };
+};
+
+// Resolve a free-text city to IATA city code via Amadeus Locations API
+async function resolveCityCode(keyword) {
+  if (!keyword) return null;
+  try {
+    const res = await amadeus.referenceData.locations.get({
+      keyword,
+      subType: "CITY",
+      "page[limit]": 5,
+    });
+    const first = res?.data?.find((x) => x.iataCode) || res?.data?.[0];
+    return first?.iataCode || null;
+  } catch {
+    return null;
   }
+}
 
-  res.json({ hotels: results });
+// ---------------------------
+// SHOWCASE (simple, dynamic sample using Paris offers as “nearby/lux” demo)
+// ---------------------------
+async function getShowcase() {
+  // A tiny dynamic showcase seeded from PAR. You can change to the user’s city if you track it server-side.
+  try {
+    const today = new Date();
+    const checkIn = new Date(today);
+    checkIn.setDate(checkIn.getDate() + 14);
+    const checkOut = new Date(checkIn);
+    checkOut.setDate(checkOut.getDate() + 1);
+
+    const r = await amadeus.shopping.hotelOffersSearch.get({
+      cityCode: "PAR",
+      adults: 1,
+      checkInDate: checkIn.toISOString().slice(0, 10),
+      checkOutDate: checkOut.toISOString().slice(0, 10),
+      sort: "PRICE",
+      "page[limit]": 6,
+      currencyCode: "USD",
+    });
+
+    const offers = r?.data || [];
+    const nearby = offers.slice(0, 6).map((o, i) => ({
+      id: `n${i + 1}`,
+      title: o.hotel?.name || "Hotel",
+      img: fallbackImg(o.hotel?.name),
+      price: Number(o.offers?.[0]?.price?.total || 0),
+      nights: "1 day, 1 guest",
+      distance:
+        o.hotel?.distance?.value && o.hotel?.distance?.unit
+          ? `${o.hotel.distance.value} ${o.hotel.distance.unit.toLowerCase()} from the center of the city`
+          : "—",
+      score: (o.hotel?.rating || "9.0").toString(),
+      scoreText: "Excellent",
+      badge: "Guest Favourite",
+    }));
+
+    const lux = offers.slice(0, 3).map((o, i) => ({
+      id: `l${i + 1}`,
+      title: o.hotel?.name || "Luxury Hotel",
+      city: `Paris, France`,
+      img: fallbackImg(`${o.hotel?.name}-lux`),
+    }));
+
+    return { nearby, luxury: lux };
+  } catch {
+    // Silent fallback to a tiny static set if Amadeus fails
+    return {
+      nearby: [
+        {
+          id: "n1",
+          title: "Radisson Blu Hotel",
+          img: fallbackImg("radisson"),
+          price: 250,
+          nights: "1 day, 1 guest",
+          distance: "—",
+          score: "9.2",
+          scoreText: "Excellent",
+          badge: "Guest Favourite",
+        },
+      ],
+      luxury: [
+        {
+          id: "l1",
+          title: "Hotel Pari Cherie",
+          city: "Paris, France",
+          img: fallbackImg("paris-lux"),
+        },
+      ],
+    };
+  }
+}
+
+// ---------------------------
+// ROUTES
+// ---------------------------
+
+// Typeahead destinations (Amadeus Locations API)
+router.get("/destinations", async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  if (!q) return res.json([]);
+  try {
+    const r = await amadeus.referenceData.locations.get({
+      keyword: q,
+      subType: "CITY",
+      "page[limit]": 8,
+    });
+    const data =
+      r?.data?.map((x) => ({
+        name: x.name || x.detailedName || x.address?.cityName || x.iataCode || q,
+        country: x.address?.countryCode || "",
+      })) ?? [];
+    // Dedup by city name
+    const seen = new Set();
+    const out = data.filter((d) => {
+      const key = `${d.name}|${d.country}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    res.json(out);
+  } catch (e) {
+    console.error("destinations error", e?.response?.data || e);
+    res.json([]);
+  }
 });
 
-// Rooms by hotel and dates
-router.get("/hotels/:id/rooms", (req, res) => {
-  const { id } = req.params;
-  const h = HOTELS.find(x => x.id === id);
-  if (!h) return res.status(404).json({ error: "Hotel not found" });
+// Showcase sections (built from Amadeus best-effort; falls back silently)
+router.get("/showcase", async (_req, res) => {
+  const payload = await getShowcase();
+  res.json(payload);
+});
 
+// Hotels search (Amadeus Hotel Offers Search)
+// Query: destination (free text city), checkIn, checkOut, sort
+router.get("/hotels", async (req, res) => {
+  const { destination = "", checkIn, checkOut, sort = "Recommended" } = req.query;
+
+  try {
+    const cityCode =
+      (await resolveCityCode(String(destination))) ||
+      // let Amadeus try to parse three-letter if user typed IATA already
+      (String(destination).length === 3 ? String(destination).toUpperCase() : null);
+
+    if (!cityCode) return res.json({ hotels: [] });
+
+    const params = {
+      cityCode,
+      adults: 1,
+      currencyCode: "USD",
+      "page[limit]": 25,
+    };
+
+    if (checkIn) params.checkInDate = String(checkIn);
+    if (checkOut) params.checkOutDate = String(checkOut);
+    if (sort === "Cheapest") params.sort = "PRICE"; // Amadeus supports PRICE sort
+
+    const r = await amadeus.shopping.hotelOffersSearch.get(params);
+    let items = r?.data || [];
+
+    // Map to your card model
+    let hotels = items.map(mapOfferToHotelCard);
+
+    // Additional sorts that Amadeus doesn't provide server-side
+    switch (sort) {
+      case "Higher rating":
+        hotels = hotels.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+        break;
+      case "Newest listings":
+        // No "createdAt" in Self-Service; randomize to avoid bias
+        hotels = hotels.sort(() => Math.random() - 0.5);
+        break;
+      case "Closest to city center":
+        hotels = hotels.sort((a, b) => {
+          const km = (s) => {
+            const m = /([0-9.]+)\s*([a-z]+)/i.exec(s || "");
+            return m ? Number(m[1]) : Number.POSITIVE_INFINITY;
+          };
+          return km(a.distance) - km(b.distance);
+        });
+        break;
+      default:
+        // Recommended → leave as-is
+        break;
+    }
+
+    res.json({ hotels });
+  } catch (e) {
+    console.error("hotels error", e?.response?.data || e);
+    res.json({ hotels: [] });
+  }
+});
+
+// Rooms by hotel and dates (Amadeus Hotel Offers by Hotel)
+router.get("/hotels/:id/rooms", async (req, res) => {
+  const { id } = req.params;
   const { checkIn, checkOut } = req.query;
+
   const nights = Math.max(1, nightsBetween(checkIn, checkOut));
 
-  const rooms = [
-    {
-      id: "r1",
-      name: "Standard Room",
-      bed: "1 Queen bed · 20 m²",
-      img: "https://images.unsplash.com/photo-1551776235-dde6d4829808?q=80&w=1200&auto=format&fit=crop",
-      price: h.price,
-      tags: ["Free cancellation"],
-      perks: ["Pay at the property","No prepayment required","Free Wi-Fi","Air conditioning","No hidden fees"]
-    },
-    {
-      id: "r2",
-      name: "Deluxe Room",
-      bed: "1 King bed · 28 m²",
-      img: "https://images.unsplash.com/photo-1600585154526-990dced4db0d?q=80&w=1200&auto=format&fit=crop",
-      price: Math.round(h.price * 1.6),
-      tags: ["Breakfast included","Free cancellation"],
-      perks: ["City view","Late checkout","Free Wi-Fi","Air conditioning","No hidden fees"]
-    },
-    {
-      id: "r3",
-      name: "Executive Suite",
-      bed: "1 King bed · 45 m²",
-      img: "https://images.unsplash.com/photo-1501117716987-c8e1ecb2101f?q=80&w=1200&auto=format&fit=crop",
-      price: Math.round(h.price * 2.1),
-      tags: ["Most popular"],
-      perks: ["Separate living area","Free Wi-Fi","Breakfast","Free cancellation","No hidden fees"]
-    }
-  ];
+  try {
+    const params = {
+      hotelIds: id,
+      "page[limit]": 20,
+      currencyCode: "USD",
+    };
+    if (checkIn) params.checkInDate = String(checkIn);
+    if (checkOut) params.checkOutDate = String(checkOut);
 
-  res.json({ nights, rooms });
+    const r = await amadeus.shopping.hotelOffersSearch.get(params);
+    const items = r?.data?.[0]?.offers || []; // response groups by hotel
+    const rooms = items.map((offer) => mapOfferToRoom(offer, nights));
+
+    res.json({ nights, rooms });
+  } catch (e) {
+    console.error("rooms error", e?.response?.data || e);
+    res.json({ nights, rooms: [] });
+  }
 });
 
 export default router;
