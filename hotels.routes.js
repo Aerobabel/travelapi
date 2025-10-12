@@ -10,7 +10,7 @@ const router = Router();
 const amadeus = new Amadeus({
   clientId: process.env.AMADEUS_CLIENT_ID,
   clientSecret: process.env.AMADEUS_CLIENT_SECRET,
-  // hostname: process.env.AMADEUS_HOSTNAME || 'test', // set to 'production' in env for live
+  // hostname: process.env.AMADEUS_HOSTNAME || 'test', // set 'production' for live
 });
 
 // ---------------------------
@@ -23,13 +23,11 @@ const nightsBetween = (a, b) => {
   return Math.max(0, Math.round((B - A) / 86400000));
 };
 
-// Basic fallback image if the API doesn't provide media (Self-Service Hotel APIs don't include images)
 const fallbackImg = (seed = "hotel") =>
   `https://images.unsplash.com/photo-1551776235-dde6d4829808?q=80&w=1200&auto=format&fit=crop&sig=${encodeURIComponent(
     seed
   )}`;
 
-// Map Amadeus hotel offer → your frontend Hotel card
 const mapOfferToHotelCard = (offerItem) => {
   const hotel = offerItem.hotel || {};
   const firstOffer = (offerItem.offers && offerItem.offers[0]) || {};
@@ -38,20 +36,19 @@ const mapOfferToHotelCard = (offerItem) => {
   return {
     id: hotel.hotelId || String(Math.random()),
     title: hotel.name || "Hotel",
-    price: priceTotal || 0, // total stay price when dates provided; otherwise 0 (front-end still renders)
+    price: priceTotal || 0,
     rating: hotel.rating ? Number(hotel.rating) : 0,
-    tags: [], // Amadeus doesn't expose marketing tags in Self-Service; keep empty
+    tags: [],
     distance:
       hotel.distance?.value && hotel.distance?.unit
         ? `${hotel.distance.value} ${hotel.distance.unit.toLowerCase()} from center`
         : "—",
-    perks: ["Free Wi-Fi", "No hidden fees"], // simple defaults; enrich per policy if desired
+    perks: ["Free Wi-Fi", "No hidden fees"],
     img: fallbackImg(hotel.name),
     city: hotel.cityCode || "",
   };
 };
 
-// Map Amadeus room offer → your frontend Room card
 const mapOfferToRoom = (offer, nights) => {
   const desc = offer.room?.description?.text || "";
   const type = offer.room?.typeEstimated || {};
@@ -60,13 +57,12 @@ const mapOfferToRoom = (offer, nights) => {
       ? `${type.beds} ${String(type.bedType).toLowerCase()} bed${type.beds > 1 ? "s" : ""}`
       : desc || "Room";
 
-  // Amadeus price.total is for the whole stay; convert to per-night for your UI
   const total = Number(offer.price?.total || 0);
   const perNight = nights > 0 ? Math.round(total / nights) : total;
 
   const tags = [];
   if (offer.policies?.cancellations?.length) tags.push("Free cancellation");
-  if (offer.boardType) tags.push(offer.boardType); // e.g., "BREAKFAST"
+  if (offer.boardType) tags.push(offer.boardType);
 
   const perks = ["No hidden fees"];
   if (offer.room?.typeEstimated?.category) perks.push(offer.room.typeEstimated.category);
@@ -77,13 +73,13 @@ const mapOfferToRoom = (offer, nights) => {
     name: offer.room?.name || "Room",
     bed: beds,
     img: fallbackImg(offer.room?.name || "room"),
-    price: perNight, // per night (your UI expects this)
+    price: perNight,
     tags,
     perks,
   };
 };
 
-// Resolve a free-text city to IATA city code via Amadeus Locations API
+// City keyword → IATA city code
 async function resolveCityCode(keyword) {
   if (!keyword) return null;
   try {
@@ -104,8 +100,8 @@ async function listHotelIdsByCity(cityCode) {
   try {
     const r = await amadeus.referenceData.locations.hotels.byCity.get({
       cityCode,
-      // radius: 25, radiusUnit: 'KM', // optional filters
-      // 'page[limit]': 200,
+      // radius: 25, radiusUnit: "KM",
+      // "page[limit]": 200,
     });
     return (r?.data || []).map((h) => h.hotelId);
   } catch (e) {
@@ -114,11 +110,48 @@ async function listHotelIdsByCity(cityCode) {
   }
 }
 
+// Chunk helper to stay under URL length limits
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Fetch hotel offers in chunks of hotelIds to avoid 2048-byte URL limit.
+ * Returns a merged array of v3 hotel offer items.
+ */
+async function fetchOffersForHotelIdsChunked(hotelIds, baseParams = {}, chunkSize = 30) {
+  const chunks = chunkArray(hotelIds, chunkSize);
+  const results = [];
+  for (const ids of chunks) {
+    try {
+      const r = await amadeus.shopping.hotelOffersSearch.get({
+        ...baseParams,
+        hotelIds: ids.join(","),
+      });
+      if (Array.isArray(r?.data)) results.push(...r.data);
+    } catch (e) {
+      console.error("hotelOffersSearch chunk error", e?.response?.data || e);
+      // continue with other chunks
+    }
+  }
+  // de-dupe by hotelId (API may return multiple entries per property across chunks)
+  const seen = new Set();
+  const deduped = [];
+  for (const item of results) {
+    const hid = item?.hotel?.hotelId || JSON.stringify(item?.hotel || {});
+    if (seen.has(hid)) continue;
+    seen.add(hid);
+    deduped.push(item);
+  }
+  return deduped;
+}
+
 // ---------------------------
-// SHOWCASE (simple, dynamic sample using Paris offers as “nearby/lux” demo)
+// SHOWCASE (Paris demo, chunked)
 // ---------------------------
 async function getShowcase() {
-  // A tiny dynamic showcase seeded from PAR. Uses hotelIds (v3 requirement).
   try {
     const today = new Date();
     const checkIn = new Date(today);
@@ -126,21 +159,23 @@ async function getShowcase() {
     const checkOut = new Date(checkIn);
     checkOut.setDate(checkOut.getDate() + 1);
 
-    const hotelIds = (await listHotelIdsByCity("PAR")).slice(0, 50);
-    if (!hotelIds.length) throw new Error("No hotels found for PAR");
+    const hotelIds = (await listHotelIdsByCity("PAR")).slice(0, 60); // cap count
+    if (!hotelIds.length) throw new Error("No hotels for PAR");
 
-    const r = await amadeus.shopping.hotelOffersSearch.get({
-      hotelIds: hotelIds.join(","),
-      adults: 1,
-      checkInDate: checkIn.toISOString().slice(0, 10),
-      checkOutDate: checkOut.toISOString().slice(0, 10),
-      sort: "PRICE",
-      "page[limit]": 12,
-      currencyCode: "USD",
-    });
+    const items = await fetchOffersForHotelIdsChunked(
+      hotelIds,
+      {
+        adults: 1,
+        checkInDate: checkIn.toISOString().slice(0, 10),
+        checkOutDate: checkOut.toISOString().slice(0, 10),
+        sort: "PRICE",
+        "page[limit]": 20,
+        currencyCode: "USD",
+      },
+      25 // smaller chunk for showcase
+    );
 
-    const offers = r?.data || [];
-    const nearby = offers.slice(0, 6).map((o, i) => ({
+    const nearby = items.slice(0, 6).map((o, i) => ({
       id: `n${i + 1}`,
       title: o.hotel?.name || "Hotel",
       img: fallbackImg(o.hotel?.name),
@@ -155,7 +190,7 @@ async function getShowcase() {
       badge: "Guest Favourite",
     }));
 
-    const lux = offers.slice(0, 3).map((o, i) => ({
+    const lux = items.slice(0, 3).map((o, i) => ({
       id: `l${i + 1}`,
       title: o.hotel?.name || "Luxury Hotel",
       city: `Paris, France`,
@@ -164,7 +199,6 @@ async function getShowcase() {
 
     return { nearby, luxury: lux };
   } catch {
-    // Silent fallback to a tiny static set if Amadeus fails
     return {
       nearby: [
         {
@@ -195,7 +229,7 @@ async function getShowcase() {
 // ROUTES
 // ---------------------------
 
-// Typeahead destinations (Amadeus Locations API)
+// Typeahead destinations
 router.get("/destinations", async (req, res) => {
   const q = String(req.query.q || "").trim();
   if (!q) return res.json([]);
@@ -210,7 +244,6 @@ router.get("/destinations", async (req, res) => {
         name: x.name || x.detailedName || x.address?.cityName || x.iataCode || q,
         country: x.address?.countryCode || "",
       })) ?? [];
-    // Dedup by city name
     const seen = new Set();
     const out = data.filter((d) => {
       const key = `${d.name}|${d.country}`;
@@ -225,14 +258,13 @@ router.get("/destinations", async (req, res) => {
   }
 });
 
-// Showcase sections (built from Amadeus best-effort; falls back silently)
+// Showcase sections
 router.get("/showcase", async (_req, res) => {
   const payload = await getShowcase();
   res.json(payload);
 });
 
-// Hotels search (Amadeus Hotel Offers Search v3 requires hotelIds)
-// Query: destination (free text city), checkIn, checkOut, sort
+// Hotels search (chunked to avoid long URL)
 router.get("/hotels", async (req, res) => {
   const { destination = "", checkIn, checkOut, sort = "Recommended" } = req.query;
 
@@ -243,38 +275,34 @@ router.get("/hotels", async (req, res) => {
 
     if (!cityCode) return res.json({ hotels: [] });
 
-    // v3 requires hotelIds: list hotels by city → get their IDs
-    const hotelIds = (await listHotelIdsByCity(cityCode)).slice(0, 200);
+    // Limit how many properties we query to keep things fast
+    const hotelIds = (await listHotelIdsByCity(cityCode)).slice(0, 120);
     if (!hotelIds.length) return res.json({ hotels: [] });
 
-    const params = {
-      hotelIds: hotelIds.join(","),
+    const baseParams = {
       adults: 1,
       currencyCode: "USD",
-      "page[limit]": 200,
+      "page[limit]": 50,
     };
+    if (checkIn) baseParams.checkInDate = String(checkIn);
+    if (checkOut) baseParams.checkOutDate = String(checkOut);
 
-    if (checkIn) params.checkInDate = String(checkIn);
-    if (checkOut) params.checkOutDate = String(checkOut);
-    if (sort === "Cheapest") params.sort = "PRICE"; // server-side price sort
+    // Amadeus supports sort=PRICE, but we apply it client-side after merging chunks anyway
+    const items = await fetchOffersForHotelIdsChunked(hotelIds, baseParams, 30);
 
-    const r = await amadeus.shopping.hotelOffersSearch.get(params);
-    let items = r?.data || [];
-
-    // Map to your card model
+    // Map → your UI model
     let hotels = items.map(mapOfferToHotelCard);
 
-    // Additional sorts that Amadeus doesn't provide server-side
+    // Sorts expected by your frontend
     switch (sort) {
-      case "Higher rating":
-        hotels = hotels.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+      case "Cheapest":
+        hotels.sort((a, b) => (a.price || 0) - (b.price || 0));
         break;
-      case "Newest listings":
-        // No "createdAt" in Self-Service; randomize to avoid bias
-        hotels = hotels.sort(() => Math.random() - 0.5);
+      case "Higher rating":
+        hotels.sort((a, b) => (b.rating || 0) - (a.rating || 0));
         break;
       case "Closest to city center":
-        hotels = hotels.sort((a, b) => {
+        hotels.sort((a, b) => {
           const km = (s) => {
             const m = /([0-9.]+)\s*([a-z]+)/i.exec(s || "");
             return m ? Number(m[1]) : Number.POSITIVE_INFINITY;
@@ -282,8 +310,11 @@ router.get("/hotels", async (req, res) => {
           return km(a.distance) - km(b.distance);
         });
         break;
+      case "Newest listings":
+        hotels.sort(() => Math.random() - 0.5);
+        break;
       default:
-        // Recommended → leave as-is
+        // Recommended: leave as-is
         break;
     }
 
@@ -294,7 +325,7 @@ router.get("/hotels", async (req, res) => {
   }
 });
 
-// Rooms by hotel and dates (Amadeus Hotel Offers by Hotel)
+// Rooms by hotel and dates (single id → no chunking needed)
 router.get("/hotels/:id/rooms", async (req, res) => {
   const { id } = req.params;
   const { checkIn, checkOut } = req.query;
@@ -303,7 +334,7 @@ router.get("/hotels/:id/rooms", async (req, res) => {
 
   try {
     const params = {
-      hotelIds: id, // v3 requires hotelIds
+      hotelIds: id,
       "page[limit]": 20,
       currencyCode: "USD",
     };
@@ -311,7 +342,7 @@ router.get("/hotels/:id/rooms", async (req, res) => {
     if (checkOut) params.checkOutDate = String(checkOut);
 
     const r = await amadeus.shopping.hotelOffersSearch.get(params);
-    const items = r?.data?.[0]?.offers || []; // response groups by hotel
+    const items = r?.data?.[0]?.offers || [];
     const rooms = items.map((offer) => mapOfferToRoom(offer, nights));
 
     res.json({ nights, rooms });
