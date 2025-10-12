@@ -10,6 +10,7 @@ const router = Router();
 const amadeus = new Amadeus({
   clientId: process.env.AMADEUS_CLIENT_ID,
   clientSecret: process.env.AMADEUS_CLIENT_SECRET,
+  // hostname: process.env.AMADEUS_HOSTNAME || 'test', // set to 'production' in env for live
 });
 
 // ---------------------------
@@ -98,11 +99,26 @@ async function resolveCityCode(keyword) {
   }
 }
 
+// List hotelIds by city (required by v3 /shopping/hotel-offers)
+async function listHotelIdsByCity(cityCode) {
+  try {
+    const r = await amadeus.referenceData.locations.hotels.byCity.get({
+      cityCode,
+      // radius: 25, radiusUnit: 'KM', // optional filters
+      // 'page[limit]': 200,
+    });
+    return (r?.data || []).map((h) => h.hotelId);
+  } catch (e) {
+    console.error("listHotelIdsByCity error", e?.response?.data || e);
+    return [];
+  }
+}
+
 // ---------------------------
 // SHOWCASE (simple, dynamic sample using Paris offers as “nearby/lux” demo)
 // ---------------------------
 async function getShowcase() {
-  // A tiny dynamic showcase seeded from PAR. You can change to the user’s city if you track it server-side.
+  // A tiny dynamic showcase seeded from PAR. Uses hotelIds (v3 requirement).
   try {
     const today = new Date();
     const checkIn = new Date(today);
@@ -110,13 +126,16 @@ async function getShowcase() {
     const checkOut = new Date(checkIn);
     checkOut.setDate(checkOut.getDate() + 1);
 
+    const hotelIds = (await listHotelIdsByCity("PAR")).slice(0, 50);
+    if (!hotelIds.length) throw new Error("No hotels found for PAR");
+
     const r = await amadeus.shopping.hotelOffersSearch.get({
-      cityCode: "PAR",
+      hotelIds: hotelIds.join(","),
       adults: 1,
       checkInDate: checkIn.toISOString().slice(0, 10),
       checkOutDate: checkOut.toISOString().slice(0, 10),
       sort: "PRICE",
-      "page[limit]": 6,
+      "page[limit]": 12,
       currencyCode: "USD",
     });
 
@@ -212,7 +231,7 @@ router.get("/showcase", async (_req, res) => {
   res.json(payload);
 });
 
-// Hotels search (Amadeus Hotel Offers Search)
+// Hotels search (Amadeus Hotel Offers Search v3 requires hotelIds)
 // Query: destination (free text city), checkIn, checkOut, sort
 router.get("/hotels", async (req, res) => {
   const { destination = "", checkIn, checkOut, sort = "Recommended" } = req.query;
@@ -220,21 +239,24 @@ router.get("/hotels", async (req, res) => {
   try {
     const cityCode =
       (await resolveCityCode(String(destination))) ||
-      // let Amadeus try to parse three-letter if user typed IATA already
       (String(destination).length === 3 ? String(destination).toUpperCase() : null);
 
     if (!cityCode) return res.json({ hotels: [] });
 
+    // v3 requires hotelIds: list hotels by city → get their IDs
+    const hotelIds = (await listHotelIdsByCity(cityCode)).slice(0, 200);
+    if (!hotelIds.length) return res.json({ hotels: [] });
+
     const params = {
-      cityCode,
+      hotelIds: hotelIds.join(","),
       adults: 1,
       currencyCode: "USD",
-      "page[limit]": 25,
+      "page[limit]": 200,
     };
 
     if (checkIn) params.checkInDate = String(checkIn);
     if (checkOut) params.checkOutDate = String(checkOut);
-    if (sort === "Cheapest") params.sort = "PRICE"; // Amadeus supports PRICE sort
+    if (sort === "Cheapest") params.sort = "PRICE"; // server-side price sort
 
     const r = await amadeus.shopping.hotelOffersSearch.get(params);
     let items = r?.data || [];
@@ -281,7 +303,7 @@ router.get("/hotels/:id/rooms", async (req, res) => {
 
   try {
     const params = {
-      hotelIds: id,
+      hotelIds: id, // v3 requires hotelIds
       "page[limit]": 20,
       currencyCode: "USD",
     };
