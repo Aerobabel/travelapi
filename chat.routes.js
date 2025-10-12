@@ -20,10 +20,15 @@ const router = Router();
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
+// --- START OF MODIFIED CODE ---
+const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
+// --- END OF MODIFIED CODE ---
+
 const newReqId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
 const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
 const userMem = new Map();
+const imageCache = new Map();
 
 const getMem = (userId) => {
   if (!userMem.has(userId)) {
@@ -125,19 +130,48 @@ function extractDestination(text = "") {
 
 const FALLBACK_IMAGE_URL =
   "https://images.unsplash.com/photo-1501785888041-af3ef285b470?q=80&w=1470&auto=format&fit=crop";
+
+// --- START OF REPLACED FUNCTION ---
 async function pickPhoto(dest, reqId) {
-  const q = encodeURIComponent(`${dest} city skyline`);
-  const url = `https://source.unsplash.com/featured/800x600/?${q}`;
+  const cacheKey = (dest || "").toLowerCase().trim();
+  if (!cacheKey) return FALLBACK_IMAGE_URL;
+  if (imageCache.has(cacheKey)) {
+    logInfo(reqId, `[CACHE HIT] Serving image for "${dest}"`);
+    return imageCache.get(cacheKey);
+  }
+  logInfo(reqId, `[CACHE MISS] Fetching new image for "${dest}"`);
+  
+  if (!UNSPLASH_ACCESS_KEY) {
+    logError(reqId, "UNSPLASH_ACCESS_KEY is not set. Returning fallback image.");
+    return FALLBACK_IMAGE_URL;
+  }
+
+  const query = encodeURIComponent(`${dest} travel`);
+  const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=1&orientation=landscape`;
+
   try {
-    const res = await fetch(url, { redirect: "follow" });
-    if (res && res.url && res.url.startsWith("https://images.unsplash.com/")) {
-      return res.url;
+    const res = await fetch(url, { headers: { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}` } });
+    if (!res.ok) {
+      logError(reqId, `Unsplash API error: ${res.status} ${res.statusText}`);
+      return FALLBACK_IMAGE_URL;
+    }
+    const data = await res.json();
+    if (data.results && data.results.length > 0) {
+      const imageUrl = data.results[0].urls.regular; // 'regular' is 1080px wide
+      logInfo(reqId, `Found image for "${dest}": ${imageUrl}`);
+      imageCache.set(cacheKey, imageUrl);
+      return imageUrl;
+    } else {
+      logInfo(reqId, `No Unsplash results found for "${dest}".`);
+      return FALLBACK_IMAGE_URL;
     }
   } catch (e) {
-    logError(reqId, "Unsplash redirect failed", e.message);
+    logError(reqId, "Failed to fetch from Unsplash API", e.message);
+    return FALLBACK_IMAGE_URL;
   }
-  return FALLBACK_IMAGE_URL;
 }
+// --- END OF REPLACED FUNCTION ---
+
 
 const tools = [
   {
