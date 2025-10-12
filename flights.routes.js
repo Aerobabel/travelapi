@@ -1,276 +1,275 @@
 // flights.routes.js
-import { Router } from "express";
+import express from "express";
 import Amadeus from "amadeus";
 
-const router = Router();
+const router = express.Router();
 
+// --- Amadeus client ---
 const amadeus = new Amadeus({
-  clientId: process.env.AMADEUS_CLIENT_ID,
-  clientSecret: process.env.AMADEUS_CLIENT_SECRET,
-  // hostname: process.env.AMADEUS_HOSTNAME || 'test'
+  clientId: process.env.AMADEUS_API_KEY || process.env.AMADEUS_CLIENT_ID,
+  clientSecret: process.env.AMADEUS_API_SECRET || process.env.AMADEUS_CLIENT_SECRET,
+  host: process.env.AMADEUS_HOST || "test", // "test" | "production"
 });
 
-// ---------------------------
-// Helpers
-// ---------------------------
-function parseISOTimeToHHMM(iso) {
+/* -------------------------------- Helpers -------------------------------- */
+
+const pickIata = (label) => {
+  if (!label) return null;
+  // "City, CODE" → CODE;  "(CODE)" → CODE; "CODE" → CODE
+  const m1 = /\(([A-Z]{3})\)/i.exec(label);
+  if (m1) return m1[1].toUpperCase();
+  const parts = String(label).split(",").map((s) => s.trim());
+  const last = parts[parts.length - 1];
+  if (/^[A-Za-z]{3}$/.test(last)) return last.toUpperCase();
+  if (/^[A-Za-z]{3}$/.test(label)) return label.toUpperCase();
+  return null;
+};
+
+const fmtHHMM = (iso) => {
   try {
     const d = new Date(iso);
-    const h = String(d.getHours()).padStart(2, "0");
-    const m = String(d.getMinutes()).padStart(2, "0");
+    const h = `${d.getHours()}`.padStart(2, "0");
+    const m = `${d.getMinutes()}`.padStart(2, "0");
     return `${h}:${m}`;
   } catch {
     return "";
   }
-}
+};
 
-function parseISODurationToLabel(iso = "") {
-  // e.g. "PT3H55M" -> "3h 55m"
-  const mH = /(\d+)H/.exec(iso);
-  const mM = /(\d+)M/.exec(iso);
-  const h = mH ? Number(mH[1]) : 0;
-  const m = mM ? Number(mM[1]) : 0;
-  if (!h && !m) return "";
-  if (!h) return `${m}m`;
-  if (!m) return `${h}h`;
-  return `${h}h ${m}m`;
-}
+const durationToPretty = (dur) => {
+  // "PT3H45M" → "3h 45m"
+  if (!dur) return "";
+  const h = /(\d+)H/.exec(dur)?.[1];
+  const m = /(\d+)M/.exec(dur)?.[1];
+  return `${h ? `${h}h` : ""}${h && m ? " " : ""}${m ? `${m}m` : ""}`.trim();
+};
 
-function extractIATACode(input = "") {
-  // Accept "City, CODE" OR "CODE" OR "City (CODE)"
-  const s = String(input).trim();
-  const mParen = /\(([A-Z]{3})\)/i.exec(s);
-  if (mParen) return mParen[1].toUpperCase();
-  const parts = s.split(",").map(t => t.trim());
-  const last = parts[parts.length - 1] || s;
-  if (/^[A-Za-z]{3}$/.test(last)) return last.toUpperCase();
-  if (/^[A-Za-z]{3}$/.test(s)) return s.toUpperCase();
-  return null;
-}
-
-function uniq(arr) {
-  return Array.from(new Set(arr));
-}
-
-async function getAirlineNames(codes = []) {
-  // Small cache to avoid repeated lookups
-  if (!globalThis.__airlineCache) globalThis.__airlineCache = new Map();
-  const cache = globalThis.__airlineCache;
-
-  const need = codes.filter(c => !cache.has(c));
-  if (need.length) {
-    try {
-      const r = await amadeus.referenceData.airlines.get({
-        airlineCodes: need.join(","),
-      });
-      (r?.data || []).forEach(a => {
-        if (a.iataCode) cache.set(a.iataCode, a.businessName || a.commonName || a.officialName || a.iataCode);
-      });
-    } catch {
-      // best-effort: if lookup fails, fill with code itself
-      need.forEach(c => cache.set(c, c));
-    }
-  }
-
-  const out = {};
-  codes.forEach(c => { out[c] = cache.get(c) || c; });
-  return out;
-}
-
-// Map a single Amadeus Flight Offer → the compact card your UI expects
-async function mapOfferToCard(offer) {
+const mapOfferToCard = (offer) => {
   try {
-    const itin = offer?.itineraries?.[0];
-    if (!itin) return null;
+    const it = offer.itineraries?.[0];
+    const last = offer.itineraries?.[offer.itineraries.length - 1];
+    const seg0 = it?.segments?.[0];
+    const segL = last?.segments?.[last.segments.length - 1];
 
-    const firstSeg = itin.segments?.[0];
-    const lastSeg  = itin.segments?.[itin.segments.length - 1];
-    if (!firstSeg || !lastSeg) return null;
+    const depart = fmtHHMM(seg0?.departure?.at);
+    const arrive = fmtHHMM(segL?.arrival?.at);
 
-    const departISO = firstSeg.departure?.at;
-    const arriveISO = lastSeg.arrival?.at;
+    const airportFrom = seg0?.departure?.iataCode;
+    const airportTo = segL?.arrival?.iataCode;
 
-    const depart = parseISOTimeToHHMM(departISO);
-    const arrive = parseISOTimeToHHMM(arriveISO);
+    // Simple airline label: first segment marketing carrier
+    const airline =
+      seg0?.carrierCode ||
+      offer.validatingAirlineCodes?.[0] ||
+      "Airline";
 
-    const airportFrom = firstSeg.departure?.iataCode || "";
-    const airportTo   = lastSeg.arrival?.iataCode || "";
+    // Duration (total) and quick stop label
+    const totalDur = durationToPretty(it?.duration);
+    const stops = (it?.segments?.length || 1) - 1;
+    const stopLabel = stops === 0 ? "Direct" : (stops === 1 ? "1 stop" : `${stops} stops`);
 
-    const duration = parseISODurationToLabel(itin.duration || "");
-    const stops = Math.max(0, (itin.segments?.length || 1) - 1);
-
-    // carrier
-    const carriers = uniq((itin.segments || []).map(s => s.carrierCode).filter(Boolean));
-    const namesMap = await getAirlineNames(carriers);
-    const mainAirline = namesMap[carriers[0]] || carriers[0] || "";
-
-    // price
-    const price = Number(offer.price?.grandTotal || offer.price?.total || 0);
+    // Price
+    const price = Math.round(Number(offer.price?.grandTotal || offer.price?.total || 0));
 
     return {
       id: offer.id,
-      airline: mainAirline,
+      airline,
       depart,
       arrive,
-      from: airportFrom, // optional used in details header
-      to: airportTo,     // optional used in details header
       airportFrom,
       airportTo,
-      duration: `${duration} / ${stops === 0 ? "Direct" : stops === 1 ? "1 stop" : `${stops} stops`}`,
-      price: Math.round(price),
-      _raw: offer, // keep raw if you want to reprice later
+      duration: `${totalDur} / ${stopLabel}`,
+      price,
+      _raw: offer, // keep for repricing
     };
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------
-// ROUTES
-// ---------------------------
-
-// Airport/City typeahead
-// GET /airports?q=par
-router.get("/airports", async (req, res) => {
-  const q = String(req.query.q || "").trim();
-  if (!q) return res.json([]);
-  try {
-    const r = await amadeus.referenceData.locations.get({
-      keyword: q,
-      subType: "CITY,AIRPORT",
-      "page[limit]": 8,
-    });
-    const out = (r?.data || []).map(x => ({
-      city: x.address?.cityName || x.name || x.detailedName || x.iataCode || "",
-      code: x.iataCode || "",
-      country: x.address?.countryName || x.address?.countryCode || "",
-    })).filter(x => x.code);
-    res.json(out);
   } catch (e) {
-    console.error("airports error", e?.response?.data || e);
-    res.json([]);
+    return { id: offer.id || Math.random().toString(36).slice(2), airline: "Airline", depart: "", arrive: "", airportFrom: "", airportTo: "", duration: "", price: 0, _raw: offer };
+  }
+};
+
+/* --------------------------------- Routes --------------------------------- */
+
+/**
+ * GET /airports?q=par
+ * Uses Locations API (CITY + AIRPORT) for typeahead.
+ */
+router.get("/airports", async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim();
+    if (!q) return res.json([]);
+
+    const { data } = await amadeus.referenceData.locations.get({
+      keyword: q,
+      subType: "AIRPORT,CITY",
+      "page[limit]": 10,
+      sort: "analytics.travelers.score", // better results on test env
+    });
+
+    const rows = (data || []).map((r) => ({
+      city: r.address?.cityName || r.name || r.iataCode,
+      code: r.iataCode,
+      country: r.address?.countryName || r.address?.countryCode || "",
+      subType: r.subType,
+    }));
+    res.json(rows);
+  } catch (err) {
+    console.error("airports error", err?.description || err);
+    res.status(500).json({ error: "Failed to fetch airports" });
   }
 });
 
-// Search flight offers
-// POST /flights/search
-// Body: { from, to, departDate, returnDate?, tripType, passengers:{adults,children,infants}, travelClass?, currencyCode? }
+/**
+ * POST /flights/search
+ * body: { from, to, departDate, returnDate?, tripType, passengers, travelClass, currencyCode }
+ * Builds proper v2 Flight Offers Search payload with originDestinations.
+ */
 router.post("/flights/search", async (req, res) => {
   try {
     const {
-      from, to, departDate, returnDate,
+      from,
+      to,
+      departDate,
+      returnDate = null,
       tripType = "oneway",
       passengers = { adults: 1, children: 0, infants: 0 },
       travelClass = "ECONOMY",
       currencyCode = "USD",
+      // optional: max, nonStop, etc.
     } = req.body || {};
 
-    // normalize codes
-    const origin = extractIATACode(from);
-    const destination = extractIATACode(to);
+    const origin = pickIata(from);
+    const destination = pickIata(to);
 
-    if (!origin || !destination || !departDate) {
-      return res.status(400).json({ error: "from, to and departDate are required" });
+    if (!origin || !destination) {
+      return res.status(400).json({ error: "Invalid origin or destination. Use IATA like 'Istanbul, IST'." });
+    }
+    if (!departDate) {
+      return res.status(400).json({ error: "Missing departDate (YYYY-MM-DD)." });
     }
 
-    // slices
-    const slices = [{ origin, destination, departureDate: String(departDate) }];
-    if (tripType === "round" && returnDate) {
-      slices.push({ origin: destination, destination: origin, departureDate: String(returnDate) });
-    }
-
-    // travelers
+    // Build travelers
     const travelers = [];
-    for (let i = 0; i < (passengers.adults || 0); i++) {
-      travelers.push({ id: String(travelers.length + 1), travelerType: "ADULT" });
-    }
-    for (let i = 0; i < (passengers.children || 0); i++) {
-      travelers.push({ id: String(travelers.length + 1), travelerType: "CHILD" });
-    }
-    for (let i = 0; i < (passengers.infants || 0); i++) {
-      // Self-Service supports HELD_INFANT (on lap). SEATED_INFANT not generally supported in browse flow.
-      travelers.push({ id: String(travelers.length + 1), travelerType: "HELD_INFANT" });
-    }
-    if (!travelers.length) travelers.push({ id: "1", travelerType: "ADULT" });
+    let id = 1;
+    for (let i = 0; i < (passengers.adults || 0); i++) travelers.push({ id: `${id++}`, travelerType: "ADULT" });
+    for (let i = 0; i < (passengers.children || 0); i++) travelers.push({ id: `${id++}`, travelerType: "CHILD" });
+    for (let i = 0; i < (passengers.infants || 0); i++) travelers.push({ id: `${id++}`, travelerType: "HELD_INFANT" });
+    if (travelers.length === 0) travelers.push({ id: "1", travelerType: "ADULT" });
 
-    const body = {
+    // originDestinations with IDs we can reference in cabinRestrictions
+    const originDestinations = [
+      {
+        id: "1",
+        originLocationCode: origin,
+        destinationLocationCode: destination,
+        departureDateTimeRange: { date: departDate },
+      },
+    ];
+
+    if (tripType === "round" && returnDate) {
+      originDestinations.push({
+        id: "2",
+        originLocationCode: destination,
+        destinationLocationCode: origin,
+        departureDateTimeRange: { date: returnDate },
+      });
+    }
+
+    // Flight Offers Search payload (v2)
+    const payload = {
       currencyCode,
+      originDestinations,
       travelers,
       sources: ["GDS"],
       searchCriteria: {
+        maxFlightOffers: 50,
         flightFilters: {
-          cabinRestrictions: [{
-            cabin: String(travelClass || "ECONOMY").toUpperCase(),
-            coverage: "MOST_SEGMENTS",
-            originDestinationIds: ["1"]
-          }]
-        }
+          cabinRestrictions: [
+            {
+              cabin: String(travelClass || "ECONOMY").toUpperCase(),
+              coverage: "MOST_SEGMENTS",
+              originDestinationIds: originDestinations.map((o) => o.id),
+            },
+          ],
+        },
       },
-      // add slices after so "originDestinationIds" references are valid
     };
-    body.slices = slices.map((s, i) => ({ ...s, id: String(i + 1) }));
 
-    const r = await amadeus.shopping.flightOffersSearch.post(JSON.stringify(body));
-    const raw = r?.data || [];
-    // Map to your card model (in parallel for airline lookups)
-    const cards = (await Promise.all(raw.map(mapOfferToCard))).filter(Boolean);
+    // Call the API (SDK v8+)
+    const rsp = await amadeus.shopping.flightOffersSearch.post(JSON.stringify(payload));
+    const offers = Array.isArray(rsp.data) ? rsp.data : [];
 
-    res.json({ offers: cards });
-  } catch (e) {
-    console.error("flights search error", e?.response?.data || e);
-    res.json({ offers: [] });
+    const mapped = offers.map(mapOfferToCard);
+    res.json({ offers: mapped, raw: offers });
+  } catch (err) {
+    console.error("flights search error", err);
+    const status = err?.response?.statusCode || 500;
+    res.status(status).json({
+      error: "Flight search failed",
+      description: err?.description || err?.message || "Unknown error",
+      details: err?.response?.result || undefined,
+    });
   }
 });
 
-// Cheapest prices by date (for your price chart)
-// GET /flights/date-prices?origin=IST&destination=CDG&from=2025-12-01&to=2025-12-31&currencyCode=USD
+/**
+ * GET /flights/date-prices?origin=IST&destination=LAX&from=2025-10-10&to=2025-10-25&currencyCode=USD
+ * Uses Flight Dates API for a calendar-like min-price series.
+ */
 router.get("/flights/date-prices", async (req, res) => {
-  const origin = extractIATACode(req.query.origin);
-  const destination = extractIATACode(req.query.destination);
-  const startDate = String(req.query.from || "").trim();
-  const endDate = String(req.query.to || "").trim();
-  const currencyCode = String(req.query.currencyCode || "USD");
-
-  if (!origin || !destination || !startDate || !endDate) {
-    return res.status(400).json({ error: "origin, destination, from, to are required" });
-  }
-
   try {
-    const r = await amadeus.shopping.flightDates.get({
+    const origin = (req.query.origin || "").toString().toUpperCase();
+    const destination = (req.query.destination || "").toString().toUpperCase();
+    const from = (req.query.from || "").toString();
+    const to = (req.query.to || "").toString();
+    const currencyCode = (req.query.currencyCode || "USD").toString();
+
+    if (!origin || !destination || !from || !to) {
+      return res.status(400).json({ error: "origin, destination, from, to are required (YYYY-MM-DD)." });
+    }
+
+    // Amadeus Flight Dates (calendar) – legacy v1 endpoint via SDK
+    const { data } = await amadeus.shopping.flightDates.get({
       origin,
       destination,
-      departureDate: `${startDate},${endDate}`,
+      departureDate: `${from}--${to}`, // range
+      oneWay: true,
       currencyCode,
     });
-    const rows = (r?.data || []).map(x => ({
-      date: x.departureDate,
-      price: Number(x.price?.total || 0)
-    })).filter(x => x.date && x.price > 0);
+
+    // Map to simple rows: { date, price }
+    const rows = (data || []).map((d) => ({
+      date: d.departureDate,
+      price: Number(d.price?.total || d.price?.grandTotal || 0),
+    }));
 
     res.json({ rows });
-  } catch (e) {
-    console.error("date-prices error", e?.response?.data || e);
-    res.json({ rows: [] });
+  } catch (err) {
+    console.error("date-prices error", err);
+    res.status(500).json({ error: "Failed to fetch date prices" });
   }
 });
 
-// Optional: reprice an offer before checkout
-// POST /flights/price  { offer }  -> returns validated/priced offer
+/**
+ * POST /flights/price
+ * body: { offer } – reprices/validates a selected Flight Offer
+ */
 router.post("/flights/price", async (req, res) => {
   try {
     const offer = req.body?.offer;
-    if (!offer) return res.status(400).json({ error: "offer required" });
+    if (!offer) return res.status(400).json({ error: "Missing offer to price." });
 
-    const r = await amadeus.shopping.flightOffers.pricing.post(JSON.stringify({
-      data: {
-        type: "flight-offers-pricing",
-        flightOffers: [offer],
-      }
-    }));
-    res.json({ priced: r?.data || {} });
-  } catch (e) {
-    console.error("price error", e?.response?.data || e);
-    res.status(200).json({ priced: {} });
+    const payload = { data: { type: "flight-offers-pricing", flightOffers: [offer] } };
+    const rsp = await amadeus.shopping.flightOffers.pricing.post(JSON.stringify(payload));
+
+    res.json({ priced: rsp.result || rsp.data || rsp });
+  } catch (err) {
+    console.error("flights price error", err);
+    const status = err?.response?.statusCode || 500;
+    res.status(status).json({
+      error: "Repricing failed",
+      description: err?.description || err?.message || "Unknown error",
+      details: err?.response?.result || undefined,
+    });
   }
 });
 
