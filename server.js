@@ -10,6 +10,7 @@ import chatRoutes from "./chat.routes.js";
 
 // New: cruises router (mock, no DB)
 import cruisesRouter from "./cruises.routes.js";
+import flightsRouter from "./flights.routes.js";
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use(hotelsRouter);
 app.use(transfersRouter);
 app.use(cruisesRouter);
 app.use(chatRoutes);
+app.use(flightsRouter); 
 
 // Health check
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
