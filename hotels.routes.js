@@ -10,11 +10,65 @@ const router = Router();
 const amadeus = new Amadeus({
   clientId: process.env.AMADEUS_CLIENT_ID,
   clientSecret: process.env.AMADEUS_CLIENT_SECRET,
-  // hostname: process.env.AMADEUS_HOSTNAME || 'test', // set 'production' for live
+  // hostname: process.env.AMADEUS_HOSTNAME || 'test', // set 'production' in env for live
 });
 
 // ---------------------------
-// Helpers
+// Unsplash helpers (real photos)
+// ---------------------------
+const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY || "";
+const UNSPLASH_ENDPOINT = "https://api.unsplash.com/search/photos";
+
+const imgCache = new Map(); // simple in-memory cache to avoid hitting rate limits
+const IMG_CACHE_MAX = 1000;
+function setCache(key, val) {
+  if (imgCache.size > IMG_CACHE_MAX) {
+    // delete first inserted key (naive LRU-ish)
+    const first = imgCache.keys().next().value;
+    if (first) imgCache.delete(first);
+  }
+  imgCache.set(key, val);
+}
+async function fetchUnsplashImage(query, { fallbackSeed = "hotel" } = {}) {
+  const key = query.trim().toLowerCase();
+  if (imgCache.has(key)) return imgCache.get(key);
+
+  if (!UNSPLASH_ACCESS_KEY) {
+    const f = fallbackImg(fallbackSeed);
+    setCache(key, f);
+    return f;
+  }
+
+  try {
+    const url = new URL(UNSPLASH_ENDPOINT);
+    url.searchParams.set("query", query);
+    url.searchParams.set("per_page", "1");
+    url.searchParams.set("orientation", "landscape");
+    url.searchParams.set("content_filter", "high");
+    url.searchParams.set("client_id", UNSPLASH_ACCESS_KEY);
+
+    const r = await fetch(url.toString());
+    if (!r.ok) throw new Error(`Unsplash ${r.status}`);
+    const json = await r.json();
+    const hit = json?.results?.[0];
+    const chosen =
+      hit?.urls?.regular ||
+      hit?.urls?.full ||
+      hit?.urls?.raw ||
+      fallbackImg(fallbackSeed);
+
+    setCache(key, chosen);
+    return chosen;
+  } catch (e) {
+    console.error("unsplash error", e?.message || e);
+    const f = fallbackImg(fallbackSeed);
+    setCache(key, f);
+    return f;
+  }
+}
+
+// ---------------------------
+// General Helpers
 // ---------------------------
 const nightsBetween = (a, b) => {
   if (!a || !b) return 0;
@@ -28,6 +82,7 @@ const fallbackImg = (seed = "hotel") =>
     seed
   )}`;
 
+// Map Amadeus hotel offer → your frontend Hotel card (image injected later)
 const mapOfferToHotelCard = (offerItem) => {
   const hotel = offerItem.hotel || {};
   const firstOffer = (offerItem.offers && offerItem.offers[0]) || {};
@@ -44,11 +99,12 @@ const mapOfferToHotelCard = (offerItem) => {
         ? `${hotel.distance.value} ${hotel.distance.unit.toLowerCase()} from center`
         : "—",
     perks: ["Free Wi-Fi", "No hidden fees"],
-    img: fallbackImg(hotel.name),
+    img: fallbackImg(hotel.name), // replaced asynchronously with Unsplash
     city: hotel.cityCode || "",
   };
 };
 
+// Map Amadeus room offer → your frontend Room card (image injected later)
 const mapOfferToRoom = (offer, nights) => {
   const desc = offer.room?.description?.text || "";
   const type = offer.room?.typeEstimated || {};
@@ -72,7 +128,7 @@ const mapOfferToRoom = (offer, nights) => {
     id: offer.id || Math.random().toString(36).slice(2),
     name: offer.room?.name || "Room",
     bed: beds,
-    img: fallbackImg(offer.room?.name || "room"),
+    img: fallbackImg(offer.room?.name || "room"), // replaced asynchronously with Unsplash
     price: perNight,
     tags,
     perks,
@@ -101,7 +157,6 @@ async function listHotelIdsByCity(cityCode) {
     const r = await amadeus.referenceData.locations.hotels.byCity.get({
       cityCode,
       // radius: 25, radiusUnit: "KM",
-      // "page[limit]": 200,
     });
     return (r?.data || []).map((h) => h.hotelId);
   } catch (e) {
@@ -119,7 +174,7 @@ function chunkArray(arr, size) {
 
 /**
  * Fetch hotel offers in chunks of hotelIds to avoid 2048-byte URL limit.
- * Returns a merged array of v3 hotel offer items.
+ * Returns a merged, de-duped array of v3 hotel offer items.
  */
 async function fetchOffersForHotelIdsChunked(hotelIds, baseParams = {}, chunkSize = 30) {
   const chunks = chunkArray(hotelIds, chunkSize);
@@ -136,7 +191,7 @@ async function fetchOffersForHotelIdsChunked(hotelIds, baseParams = {}, chunkSiz
       // continue with other chunks
     }
   }
-  // de-dupe by hotelId (API may return multiple entries per property across chunks)
+  // de-dupe by hotelId
   const seen = new Set();
   const deduped = [];
   for (const item of results) {
@@ -149,7 +204,7 @@ async function fetchOffersForHotelIdsChunked(hotelIds, baseParams = {}, chunkSiz
 }
 
 // ---------------------------
-// SHOWCASE (Paris demo, chunked)
+// SHOWCASE (Paris demo, chunked, with Unsplash images)
 // ---------------------------
 async function getShowcase() {
   try {
@@ -159,7 +214,7 @@ async function getShowcase() {
     const checkOut = new Date(checkIn);
     checkOut.setDate(checkOut.getDate() + 1);
 
-    const hotelIds = (await listHotelIdsByCity("PAR")).slice(0, 60); // cap count
+    const hotelIds = (await listHotelIdsByCity("PAR")).slice(0, 60);
     if (!hotelIds.length) throw new Error("No hotels for PAR");
 
     const items = await fetchOffersForHotelIdsChunked(
@@ -172,32 +227,52 @@ async function getShowcase() {
         "page[limit]": 20,
         currencyCode: "USD",
       },
-      25 // smaller chunk for showcase
+      25
     );
 
-    const nearby = items.slice(0, 6).map((o, i) => ({
-      id: `n${i + 1}`,
-      title: o.hotel?.name || "Hotel",
-      img: fallbackImg(o.hotel?.name),
-      price: Number(o.offers?.[0]?.price?.total || 0),
-      nights: "1 day, 1 guest",
-      distance:
-        o.hotel?.distance?.value && o.hotel?.distance?.unit
-          ? `${o.hotel.distance.value} ${o.hotel.distance.unit.toLowerCase()} from the center of the city`
-          : "—",
-      score: (o.hotel?.rating || "9.0").toString(),
-      scoreText: "Excellent",
-      badge: "Guest Favourite",
-    }));
+    // Build cards + fetch Unsplash images in parallel
+    const nearbyRaw = items.slice(0, 6);
+    const nearby = await Promise.all(
+      nearbyRaw.map(async (o, i) => {
+        const title = o.hotel?.name || "Hotel";
+        const city = "Paris";
+        const img =
+          await fetchUnsplashImage(`${title} hotel ${city}`, { fallbackSeed: title }) ||
+          fallbackImg(title);
+        return {
+          id: `n${i + 1}`,
+          title,
+          img,
+          price: Number(o.offers?.[0]?.price?.total || 0),
+          nights: "1 day, 1 guest",
+          distance:
+            o.hotel?.distance?.value && o.hotel?.distance?.unit
+              ? `${o.hotel.distance.value} ${o.hotel.distance.unit.toLowerCase()} from the center of the city`
+              : "—",
+          score: (o.hotel?.rating || "9.0").toString(),
+          scoreText: "Excellent",
+          badge: "Guest Favourite",
+        };
+      })
+    );
 
-    const lux = items.slice(0, 3).map((o, i) => ({
-      id: `l${i + 1}`,
-      title: o.hotel?.name || "Luxury Hotel",
-      city: `Paris, France`,
-      img: fallbackImg(`${o.hotel?.name}-lux`),
-    }));
+    const luxRaw = items.slice(0, 3);
+    const luxury = await Promise.all(
+      luxRaw.map(async (o, i) => {
+        const title = o.hotel?.name || "Luxury Hotel";
+        const img =
+          await fetchUnsplashImage(`${title} luxury hotel Paris`, { fallbackSeed: `${title}-lux` }) ||
+          fallbackImg(`${title}-lux`);
+        return {
+          id: `l${i + 1}`,
+          title,
+          city: `Paris, France`,
+          img,
+        };
+      })
+    );
 
-    return { nearby, luxury: lux };
+    return { nearby, luxury };
   } catch {
     return {
       nearby: [
@@ -264,7 +339,7 @@ router.get("/showcase", async (_req, res) => {
   res.json(payload);
 });
 
-// Hotels search (chunked to avoid long URL)
+// Hotels search (chunked + Unsplash)
 router.get("/hotels", async (req, res) => {
   const { destination = "", checkIn, checkOut, sort = "Recommended" } = req.query;
 
@@ -275,7 +350,6 @@ router.get("/hotels", async (req, res) => {
 
     if (!cityCode) return res.json({ hotels: [] });
 
-    // Limit how many properties we query to keep things fast
     const hotelIds = (await listHotelIdsByCity(cityCode)).slice(0, 120);
     if (!hotelIds.length) return res.json({ hotels: [] });
 
@@ -287,11 +361,19 @@ router.get("/hotels", async (req, res) => {
     if (checkIn) baseParams.checkInDate = String(checkIn);
     if (checkOut) baseParams.checkOutDate = String(checkOut);
 
-    // Amadeus supports sort=PRICE, but we apply it client-side after merging chunks anyway
     const items = await fetchOffersForHotelIdsChunked(hotelIds, baseParams, 30);
 
-    // Map → your UI model
-    let hotels = items.map(mapOfferToHotelCard);
+    // Map → UI, then swap images with Unsplash (parallelized)
+    let hotels = await Promise.all(
+      items.map(async (it) => {
+        const card = mapOfferToHotelCard(it);
+        const city = it.hotel?.cityCode || cityCode;
+        const img =
+          await fetchUnsplashImage(`${card.title} hotel ${city}`, { fallbackSeed: card.title }) ||
+          fallbackImg(card.title);
+        return { ...card, img };
+      })
+    );
 
     // Sorts expected by your frontend
     switch (sort) {
@@ -314,7 +396,6 @@ router.get("/hotels", async (req, res) => {
         hotels.sort(() => Math.random() - 0.5);
         break;
       default:
-        // Recommended: leave as-is
         break;
     }
 
@@ -325,7 +406,7 @@ router.get("/hotels", async (req, res) => {
   }
 });
 
-// Rooms by hotel and dates (single id → no chunking needed)
+// Rooms by hotel and dates (Unsplash “hotel room interior”)
 router.get("/hotels/:id/rooms", async (req, res) => {
   const { id } = req.params;
   const { checkIn, checkOut } = req.query;
@@ -343,7 +424,17 @@ router.get("/hotels/:id/rooms", async (req, res) => {
 
     const r = await amadeus.shopping.hotelOffersSearch.get(params);
     const items = r?.data?.[0]?.offers || [];
-    const rooms = items.map((offer) => mapOfferToRoom(offer, nights));
+    const baseRooms = items.map((offer) => mapOfferToRoom(offer, nights));
+
+    // Replace room images with Unsplash variants (parallel)
+    const rooms = await Promise.all(
+      baseRooms.map(async (room, idx) => {
+        const img =
+          await fetchUnsplashImage(`${room.name} hotel room interior`, { fallbackSeed: `${room.name}-${idx}` }) ||
+          room.img;
+        return { ...room, img };
+      })
+    );
 
     res.json({ nights, rooms });
   } catch (e) {
