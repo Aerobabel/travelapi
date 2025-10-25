@@ -20,11 +20,10 @@ try {
 
 const router = Router();
 
+const OPENAI_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-4o-mini";
 const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY);
 const hasSerpKey = Boolean(process.env.SERPAPI_API_KEY);
 const client = hasOpenAIKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
-
-const OPENAI_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-4o-mini";
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
 /* ----------------------------- LOGGING ------------------------------- */
@@ -175,7 +174,6 @@ function expandDateRangeToDates(startYMD, endYMD) {
 /** Returns { temp: number, icon: "sunny"|"partly-sunny"|"cloudy" } using forecast; falls back to climate means */
 async function fetchWeatherSummary(city, startYMD, reqId) {
   try {
-    // 1) geocode
     const g = await fetch(
       `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1`
     ).then((r) => r.json());
@@ -184,13 +182,11 @@ async function fetchWeatherSummary(city, startYMD, reqId) {
 
     const { latitude, longitude, timezone } = loc;
 
-    // 2) try forecast for the start date
-    const d0 = startYMD;
     const forecastUrl =
       `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}` +
       `&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=${encodeURIComponent(
         timezone || "auto"
-      )}&start_date=${d0}&end_date=${d0}`;
+      )}&start_date=${startYMD}&end_date=${startYMD}`;
     const f = await fetch(forecastUrl).then((r) => r.json());
 
     let avg = null;
@@ -202,14 +198,12 @@ async function fetchWeatherSummary(city, startYMD, reqId) {
       avg = Math.round((tmax + tmin) / 2);
     }
     if (typeof code === "number") {
-      // very small mapping to requested icons
       if ([0].includes(code)) icon = "sunny";
       else if ([1, 2, 3].includes(code)) icon = "partly-sunny";
       else icon = "cloudy";
     }
     if (avg != null && icon) return { temp: avg, icon };
 
-    // 3) fallback to monthly climate normals
     const month = new Date(startYMD).getMonth() + 1;
     const climateUrl =
       `https://climate-api.open-meteo.com/v1/climate?latitude=${latitude}&longitude=${longitude}` +
@@ -229,7 +223,6 @@ async function fetchWeatherSummary(city, startYMD, reqId) {
 }
 
 /* ---------------------------- SERP TOOLS ----------------------------- */
-// We keep the conversation natural; these run silently when needed.
 // Note: serpapi@1.1.1 signature is getJson(engine, params)
 async function serpFlights(params, reqId) {
   if (!hasSerpKey) return { error: "Flight search unavailable." };
@@ -290,17 +283,15 @@ async function serpHotels(params, reqId) {
 }
 
 /* ---------------------------- OPENAI TOOLS --------------------------- */
-/** We ask conversationally first; tools emit lightweight UI signals; no raw lists dumped. */
+// Conversational slot filling tools (emit UI signals) + silent data tools + finalizer
 const tools = [
-  // Slot-filling tools (UI asks)
   { type: "function", function: { name: "request_destination", description: "Ask which city/country the user wants to visit.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "request_dates", description: "Ask for start and end dates (YYYY-MM-DD).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "request_guests", description: "Ask for number of adults/children.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "request_departure", description: "Ask for departure city/airport (IATA if known).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "request_budget", description: "Ask for budget per person and currency.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "request_preferences", description: "Ask for style (relaxing/active/urban/beach), hotel type, interests.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "request_preferences", description: "Ask for style (relaxing/active/urban/beach), interests, hotel vibe.", parameters: { type: "object", properties: {} } } },
 
-  // Real-data tools (silent usage)
   {
     type: "function",
     function: {
@@ -343,16 +334,11 @@ const tools = [
       description: "Fetch weather summary for the start date (Open-Meteo).",
       parameters: {
         type: "object",
-        properties: {
-          location: { type: "string" },
-          start_date: { type: "string", description: "YYYY-MM-DD" },
-        },
+        properties: { location: { type: "string" }, start_date: { type: "string" } },
         required: ["location", "start_date"],
       },
     },
   },
-
-  // Finalizer
   {
     type: "function",
     function: {
@@ -429,9 +415,9 @@ CORE PRINCIPLES
 - CONVERSATION FIRST: Ask one friendly question at a time to fill missing info: destination, dates, guests, budget (amount & currency) per person, departure city/airport, and preferences (style, interests, hotel vibe).
 - NO DUMPING: Do not list raw flights/hotels unless user asks. Use results silently to craft a plan.
 - DATES: In the itinerary, use actual calendar dates (YYYY-MM-DD) and also a display field like "Oct 1".
-- WEATHER: Always include a weather.summary for the start date using get_weather (icon ∈ {sunny, partly-sunny, cloudy} + average temp in °C).
-- ITINERARY QUALITY: For EACH day, 3–5 concrete events with times, realistic venues/areas, breaks/meals, and intra-city transfers. Vary activities based on preferences.
-- PROFILE ADAPTATION: Reflect user's profile in the plan; mention how it influenced choices in the description.
+- WEATHER: Always include a weather summary for the start date using get_weather (icon ∈ {sunny, partly-sunny, cloudy} + average temp in °C).
+- ITINERARY QUALITY: For EACH day, 3–5 concrete events with times, realistic venues/areas, breaks/meals, and transfers. Vary activities based on preferences.
+- PROFILE ADAPTATION: Reflect the user's profile in the plan; mention how it influenced choices in the description.
 - FINALIZATION: Only call create_plan when all key slots are captured.
 
 USER PROFILE:
@@ -468,11 +454,23 @@ router.post("/travel", async (req, res) => {
     }
 
     const systemPrompt = getSystemPrompt(mem.profile);
-    const convo = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
+    const base = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
 
-    // Agent loop (multi-step tool usage)
+    // Nudge: if any slots are missing, ask via request_* tools
+    const nudger = {
+      role: "system",
+      content:
+        "If destination is missing, call request_destination. " +
+        "If dates are missing, call request_dates. " +
+        "If guests are missing, call request_guests. " +
+        "If departure city/airport is missing, call request_departure. " +
+        "If budget (amount & currency) is missing, call request_budget. " +
+        "If preferences are missing, call request_preferences. " +
+        "Only after all are known, silently use search_flights, search_hotels, get_weather, then call create_plan.",
+    };
+
     const MAX_TURNS = 8;
-    let loopMessages = [...convo];
+    let loopMessages = [...base, nudger];
 
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       const completion = await client.chat.completions.create({
@@ -486,60 +484,8 @@ router.post("/travel", async (req, res) => {
       const msg = completion.choices?.[0]?.message;
       const toolCalls = msg?.tool_calls || [];
 
-      // Handle tool calls
       if (toolCalls.length > 0) {
-        // First, UI prompt tools (emit signals)
-        for (const tc of toolCalls) {
-          const fn = tc.function?.name;
-
-          if (fn === "request_destination") {
-            return res.json({
-              aiText: msg.content || "Where would you like to go?",
-              signal: { type: "destinationNeeded" },
-              assistantMessage: { role: "assistant" },
-            });
-          }
-          if (fn === "request_dates") {
-            return res.json({
-              aiText: msg.content || "What are your start and end dates?",
-              signal: { type: "dateNeeded" },
-              assistantMessage: { role: "assistant" },
-            });
-          }
-          if (fn === "request_guests") {
-            return res.json({
-              aiText: msg.content || "How many adults and children are traveling?",
-              signal: { type: "guestsNeeded" },
-              assistantMessage: { role: "assistant" },
-            });
-          }
-          if (fn === "request_departure") {
-            return res.json({
-              aiText: msg.content || "What city/airport are you departing from?",
-              signal: { type: "departureNeeded" },
-              assistantMessage: { role: "assistant" },
-            });
-          }
-          if (fn === "request_budget") {
-            return res.json({
-              aiText: msg.content || "What’s your budget per person, and in which currency?",
-              signal: { type: "budgetNeeded" },
-              assistantMessage: { role: "assistant" },
-            });
-          }
-          if (fn === "request_preferences") {
-            return res.json({
-              aiText:
-                msg.content ||
-                "What style do you want (relaxing, active, urban, beach)? Any interests or hotel vibe?",
-              signal: { type: "preferencesNeeded" },
-              assistantMessage: { role: "assistant" },
-            });
-          }
-        }
-
-        // If not a UI tool, we run back-end tools and feed results back to the model.
-        // Add assistant tool-call marker so the model sees its own request
+        // Add assistant tool-call marker
         loopMessages.push({
           role: "assistant",
           content: msg.content || "",
@@ -550,6 +496,111 @@ router.post("/travel", async (req, res) => {
           })),
         });
 
+        // UI request tools -> return with proper assistantMessage.tool_calls for your frontend
+        for (const tc of toolCalls) {
+          const fn = tc.function?.name;
+
+          if (fn === "request_destination") {
+            return res.json({
+              aiText: msg.content || "Where would you like to go?",
+              signal: { type: "destinationNeeded" },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: tc.id || `call_${reqId}`,
+                    type: "function",
+                    function: { name: "request_destination", arguments: "{}" },
+                  },
+                ],
+              },
+            });
+          }
+          if (fn === "request_dates") {
+            return res.json({
+              aiText: msg.content || "What are your start and end dates?",
+              signal: { type: "dateNeeded" },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: tc.id || `call_${reqId}`,
+                    type: "function",
+                    function: { name: "request_dates", arguments: "{}" },
+                  },
+                ],
+              },
+            });
+          }
+          if (fn === "request_guests") {
+            return res.json({
+              aiText: msg.content || "How many adults and children are traveling?",
+              signal: { type: "guestsNeeded" },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: tc.id || `call_${reqId}`,
+                    type: "function",
+                    function: { name: "request_guests", arguments: "{}" },
+                  },
+                ],
+              },
+            });
+          }
+          if (fn === "request_departure") {
+            return res.json({
+              aiText: msg.content || "What city/airport are you departing from?",
+              signal: { type: "departureNeeded" },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: tc.id || `call_${reqId}`,
+                    type: "function",
+                    function: { name: "request_departure", arguments: "{}" },
+                  },
+                ],
+              },
+            });
+          }
+          if (fn === "request_budget") {
+            return res.json({
+              aiText: msg.content || "What’s your budget per person, and in which currency?",
+              signal: { type: "budgetNeeded" },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: tc.id || `call_${reqId}`,
+                    type: "function",
+                    function: { name: "request_budget", arguments: "{}" },
+                  },
+                ],
+              },
+            });
+          }
+          if (fn === "request_preferences") {
+            return res.json({
+              aiText:
+                msg.content ||
+                "What style do you want (relaxing, active, urban, beach)? Any interests or hotel vibe?",
+              signal: { type: "preferencesNeeded" },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: tc.id || `call_${reqId}`,
+                    type: "function",
+                    function: { name: "request_preferences", arguments: "{}" },
+                  },
+                ],
+              },
+            });
+          }
+        }
+
+        // Execute silent tools or finalize plan
         for (const tc of toolCalls) {
           const fn = tc.function?.name;
           const rawArgs = tc.function?.arguments || "{}";
@@ -560,46 +611,59 @@ router.post("/travel", async (req, res) => {
             logError(reqId, `Bad tool args for ${fn}`, rawArgs);
           }
 
-          // Execute
-          let result = null;
           if (fn === "search_flights") {
-            result = await serpFlights(args, reqId);
+            const result = await serpFlights(args, reqId);
+            loopMessages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: JSON.stringify(result ?? {}),
+            });
           } else if (fn === "search_hotels") {
-            result = await serpHotels(args, reqId);
+            const result = await serpHotels(args, reqId);
+            loopMessages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: JSON.stringify(result ?? {}),
+            });
           } else if (fn === "get_weather") {
-            result = await fetchWeatherSummary(args.location, args.start_date, reqId);
+            const result = await fetchWeatherSummary(args.location, args.start_date, reqId);
+            loopMessages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: JSON.stringify(result ?? {}),
+            });
           } else if (fn === "create_plan") {
-            // Post-process server-side: enforce dates & day labels; ensure weather; add hero image.
+            // Server-side normalization & emission with assistantMessage.tool_calls for your UI
             const { dateRange, location } = args || {};
-            let start = null, end = null;
+            let startYMD = null;
+            let endYMD = null;
             if (dateRange && /to/i.test(dateRange)) {
               const [a, b] = dateRange.split(/to/i).map((s) => s.trim());
-              start = parseISO(a);
-              end = parseISO(b);
+              startYMD = fmtYMD(parseISO(a) || new Date(a));
+              endYMD = fmtYMD(parseISO(b) || new Date(b));
             }
+
             const image = await pickPhoto(location, reqId);
 
-            // Ensure weather present (or try fetch)
+            // Ensure weather present
             let weather = args.weather;
             if (!weather || typeof weather.temp !== "number" || !["sunny", "partly-sunny", "cloudy"].includes(weather.icon)) {
-              if (start) {
-                const w = await fetchWeatherSummary(location, fmtYMD(start), reqId);
+              if (startYMD) {
+                const w = await fetchWeatherSummary(location, startYMD, reqId);
                 if (w) weather = w;
               }
-              if (!weather) weather = { temp: 22, icon: "partly-sunny" }; // graceful default
+              if (!weather) weather = { temp: 22, icon: "partly-sunny" };
             }
 
-            // Normalize itinerary dates/days
+            // Align itinerary dates
             let itinerary = Array.isArray(args.itinerary) ? args.itinerary : [];
-            if (start && end && itinerary.length) {
-              const days = expandDateRangeToDates(fmtYMD(start), fmtYMD(end));
-              // If model returned "Day 1" etc., align with real dates
+            if (startYMD && endYMD && itinerary.length) {
+              const days = expandDateRangeToDates(startYMD, endYMD);
               for (let i = 0; i < itinerary.length && i < days.length; i++) {
                 itinerary[i].date = days[i].date;
-                itinerary[i].day = days[i].day; // e.g., "Oct 1"
+                itinerary[i].day = days[i].day; // "Oct 1"
               }
             } else {
-              // If no dates, still ensure correct display shape
               itinerary = itinerary.map((d) => ({
                 ...d,
                 date: d.date || fmtYMD(new Date()),
@@ -617,36 +681,42 @@ router.post("/travel", async (req, res) => {
             return res.json({
               aiText: "Here’s your personalized travel plan!",
               signal: { type: "planReady", payload },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: `call_${reqId}`,
+                    type: "function",
+                    function: {
+                      name: "create_plan",
+                      arguments: JSON.stringify(payload),
+                    },
+                  },
+                ],
+              },
             });
           }
-
-          // Feed tool result back to model (if not finalized already)
-          loopMessages.push({
-            role: "tool",
-            tool_call_id: tc.id,
-            content: JSON.stringify(result ?? {}),
-          });
         }
 
-        // Continue next turn (model will incorporate tool outputs)
+        // Continue model loop after tool results
         continue;
       }
 
-      // No tools called → just say what the assistant said
+      // No tools called → plain conversational reply
       const finalText = msg?.content?.trim();
       if (finalText) return res.json({ aiText: finalText });
 
       // Safety net
       return res.json({
         aiText:
-          "Could you share a bit more—destination, dates, guests, budget, and departure city—so I can craft a perfect plan?",
+          "Could you share destination, dates, guests, budget (per person & currency), and departure city so I can craft a perfect plan?",
       });
     }
 
     logError(reqId, "Agent loop exceeded max turns.");
     return res.status(500).json({
       aiText:
-        "I'm having trouble creating the plan right now. Could you share one detail at a time (destination, dates, guests, budget, departure)?",
+        "I'm having trouble creating the plan right now. Share one detail at a time (destination, dates, guests, budget, departure), and we’ll build it together.",
     });
   } catch (err) {
     logError(reqId, "Critical handler error:", err);
