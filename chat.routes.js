@@ -256,7 +256,6 @@ const tools = [
     type: "function",
     function: {
       name: "create_plan",
-      // CHANGE: Emphasize the need for detailed and researched plans.
       description: "Call this function ONLY when the destination, dates, and number of guests are all known, AND you have gathered sufficient details via search_web to create a highly detailed, day-by-day travel plan with specific events (at least 3-5 per day), realistic times, specific suggestions (e.g., restaurant names, tour companies, exact attractions), and a comprehensive cost breakdown. Only call this when you have rich information.",
       parameters: {
         type: "object",
@@ -309,7 +308,7 @@ const tools = [
                 details: { type: "string", description: "Specific details about the cost item (e.g., 'Round trip, economy class', '3 nights, city view room')." },
                 price: { type: "number", description: "Estimated price in USD." },
                 iconType: { type: "string", enum: ["image", "date"], description: "Type of icon for the cost item." },
-                iconValue: { type: "string", description: "URL for an image icon OR 'Month Day' for a date icon (e.g., 'Dec 26')." },
+                  iconValue: { type: "string", description: "URL for an image icon OR 'Month Day' for a date icon (e.g., 'Dec 26')." },
               },
               required: ["item", "provider", "details", "price", "iconType", "iconValue"],
             },
@@ -371,21 +370,23 @@ function deriveSlots(history = []) {
   return { destinationKnown: !!destination, destination, datesKnown, guestsKnown };
 }
 
+// REVISED: normalizeMessages to correctly preserve tool_calls and tool_call_id
 function normalizeMessages(messages = []) {
   const allowedRoles = new Set(["system", "user", "assistant", "tool"]);
   return messages
     .filter((m) => !m.hidden)
     .map((m) => {
-        if (m.role === 'tool') {
-            return {
-                role: 'tool',
-                tool_call_id: m.tool_call_id,
-                content: m.content
-            };
-        }
         const role = allowedRoles.has(m.role) ? m.role : 'user';
         const content = m.content ?? m.text ?? '';
-        return { role, content: String(content) };
+        
+        const normalizedMessage = { role, content: String(content) };
+
+        if (m.role === 'assistant' && m.tool_calls) {
+            normalizedMessage.tool_calls = m.tool_calls;
+        } else if (m.role === 'tool' && m.tool_call_id) {
+            normalizedMessage.tool_call_id = m.tool_call_id;
+        }
+        return normalizedMessage;
     });
 }
 
@@ -430,6 +431,7 @@ router.post("/travel", async (req, res) => {
     }
 
     const systemPrompt = getSystemPrompt(mem.profile);
+    // Ensure `convo` includes the full history in the correct format for the first call
     const convo = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
 
     try {
@@ -445,20 +447,21 @@ router.post("/travel", async (req, res) => {
 
       // Check for tool calls first
       if (assistantMessage?.tool_calls && assistantMessage.tool_calls.length > 0) {
-        // Handle multiple tool calls if the model generates them
         const toolOutputs = [];
-        const assistantToolCalls = []; // To store tool calls from the assistant for the responsePayload
+        const assistantToolCalls = assistantMessage.tool_calls; // Store all tool calls made by the assistant
 
-        for (const toolCall of assistantMessage.tool_calls) {
+        for (const toolCall of assistantToolCalls) { // Iterate through all tool calls
           const functionName = toolCall.function?.name;
-          logInfo(reqId, `AI called tool: ${functionName}`);
+          logInfo(reqId, `AI called tool: ${functionName} (ID: ${toolCall.id})`);
 
           let args = {};
           try {
             args = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
           } catch (e) {
-            logError(reqId, `Failed to parse AI arguments for ${functionName}, using fallback.`, e);
-            return res.json(await runFallbackFlow()); // Critical error, fallback
+            logError(reqId, `Failed to parse AI arguments for ${functionName} (ID: ${toolCall.id}), using fallback.`, e);
+            // If argument parsing fails for one tool, we might not be able to proceed cleanly.
+            // For now, let's trigger a full fallback.
+            return res.json(await runFallbackFlow());
           }
 
           if (functionName === "create_plan") {
@@ -467,83 +470,125 @@ router.post("/travel", async (req, res) => {
               args.weather.icon = "sunny"; // Default if not valid
             }
             // For create_plan, we directly return the signal and don't need a tool_output to the AI
+            // Ensure assistantMessage is correctly structured for the frontend
             return res.json({ 
                 assistantMessage: {
-                    ...assistantMessage, // Pass the original assistant message including tool_calls
+                    role: 'assistant',
                     content: assistantMessage.content || '',
+                    tool_calls: assistantMessage.tool_calls // Include the tool calls in the message sent to frontend
                 },
                 signal: { type: "planReady", payload: args },
                 aiText: "Here is your personalized plan!" 
             });
           } else if (functionName === "request_dates") {
             return res.json({ 
-                assistantMessage: { ...assistantMessage, content: assistantMessage.content || '' },
+                assistantMessage: {
+                    role: 'assistant',
+                    content: assistantMessage.content || '',
+                    tool_calls: assistantMessage.tool_calls
+                },
                 signal: { type: "dateNeeded" }, 
                 aiText: "When would you like to travel?" 
             });
           } else if (functionName === "request_guests") {
             return res.json({ 
-                assistantMessage: { ...assistantMessage, content: assistantMessage.content || '' },
+                assistantMessage: {
+                    role: 'assistant',
+                    content: assistantMessage.content || '',
+                    tool_calls: assistantMessage.tool_calls
+                },
                 signal: { type: "guestsNeeded" }, 
                 aiText: "How many people are traveling?" 
             });
           } else if (functionName === "search_web") {
             const searchResult = await performSearch(args.query, reqId);
             toolOutputs.push({
-              tool_call_id: toolCall.id,
+              tool_call_id: toolCall.id, // CRITICAL: Use the toolCall.id from the assistant message
               output: searchResult,
             });
-            assistantToolCalls.push(toolCall); // Store this toolCall
+            // Note: assistantToolCalls already contains the original tool call, no need to push again
+          } else {
+              logError(reqId, `Unknown tool function called: ${functionName}`);
+              // Decide how to handle unknown tool calls, fallback or error message
+              return res.json(await runFallbackFlow());
           }
         }
 
-        // If search_web was called, send the tool outputs back to the model
+        // If search_web was called and we have outputs, send them back to the model
         if (toolOutputs.length > 0) {
+            // CRITICAL: Build messages for the *next* API call correctly
+            // It must contain:
+            // 1. System prompt
+            // 2. Previous user messages
+            // 3. The assistant's message with tool_calls (from the current turn)
+            // 4. The tool messages with their outputs (responses to the above tool_calls)
+            
+            const messagesForToolResponse = [
+                ...convo, // All previous messages up to the current assistant turn
+                {
+                    role: "assistant",
+                    content: assistantMessage.content || '', // Ensure content is not null
+                    tool_calls: assistantToolCalls // Include the actual tool calls made by the assistant
+                },
+                ...toolOutputs.map(output => ({
+                    role: "tool",
+                    tool_call_id: output.tool_call_id,
+                    content: output.output // Send the stringified JSON output
+                }))
+            ];
+
             const responseToToolCall = await client.chat.completions.create({
                 model: "gpt-4o",
-                messages: [
-                    ...convo, // Include previous conversation
-                    {
-                        role: "assistant",
-                        tool_calls: assistantToolCalls // Include the actual tool calls made by the assistant
-                    },
-                    ...toolOutputs.map(output => ({
-                        role: "tool",
-                        tool_call_id: output.tool_call_id,
-                        content: output.output // Send the stringified JSON output
-                    }))
-                ],
+                messages: messagesForToolResponse,
                 tools,
                 tool_choice: "auto",
             });
             
             const nextAssistantMessage = responseToToolCall.choices?.[0]?.message;
+
+            // Update `messages` for the next potential recursion or final response
+            // This is crucial for maintaining conversation history for the frontend
+            const updatedMessages = [
+                ...messages, // Original history
+                { // Add the assistant's response that included the tool_calls
+                    role: 'assistant', 
+                    content: assistantMessage.content || '', 
+                    tool_calls: assistantMessage.tool_calls 
+                }, 
+                ...toolOutputs.map(output => ({ // Add the tool execution results
+                    role: 'tool', 
+                    tool_call_id: output.tool_call_id, 
+                    content: output.output 
+                }))
+            ];
+
             if (nextAssistantMessage?.tool_calls && nextAssistantMessage.tool_calls.length > 0) {
-                // If the AI makes another tool call (e.g., create_plan after search),
-                // we'll process it in the next iteration or handle here.
-                // For simplicity, let's just re-call the main handler with updated messages.
-                // In a real-world scenario, you might want to manage state more explicitly.
-                logInfo(reqId, "AI made another tool call after search. Re-processing.");
-                // Add the assistant's previous tool calls and the tool outputs to the messages for the next call
-                const updatedMessages = [
-                    ...messages,
-                    { role: 'assistant', tool_calls: assistantToolCalls, content: '' }, // Original tool call
-                    ...toolOutputs.map(output => ({ role: 'tool', tool_call_id: output.tool_call_id, content: output.output })) // Tool results
-                ];
-                // Now, add the new assistant message (which might contain another tool_call or final text)
-                if (nextAssistantMessage.tool_calls) {
-                    updatedMessages.push({ role: 'assistant', tool_calls: nextAssistantMessage.tool_calls, content: nextAssistantMessage.content || '' });
-                } else {
-                     updatedMessages.push({ role: 'assistant', content: nextAssistantMessage.content || '' });
-                }
+                // If the AI makes *another* tool call (e.g., create_plan after search)
+                logInfo(reqId, "AI made another tool call after search. Recursively processing.");
+                
+                // Add the new assistant message (which might contain another tool_call or final text)
+                updatedMessages.push({ 
+                    role: 'assistant', 
+                    tool_calls: nextAssistantMessage.tool_calls, 
+                    content: nextAssistantMessage.content || '' 
+                });
 
                 // Recursively call the route handler with the updated messages
                 // This simulates the turn-taking with the AI
                 req.body.messages = updatedMessages; 
                 return router.handle(req, res); // Re-invoke the router for next step
-            } else if (nextAssistantMessage?.content) {
-                // If after search, the AI just responds with text, return it.
-                return res.json({ aiText: nextAssistantMessage.content });
+            } else {
+                // If after search, the AI just responds with text or completes.
+                // Add the final assistant message to the history.
+                if (nextAssistantMessage?.content) {
+                     updatedMessages.push({ role: 'assistant', content: nextAssistantMessage.content });
+                }
+               
+                return res.json({ 
+                    aiText: nextAssistantMessage?.content || "I have processed the search results.",
+                    // This is where you might return a final plan if the nextAssistantMessage was create_plan
+                    // For now, assume a text response unless it explicitly calls create_plan
+                });
             }
         }
       }
@@ -559,6 +604,10 @@ router.post("/travel", async (req, res) => {
 
     } catch (e) {
       logError(reqId, "OpenAI API call failed. Responding with fallback flow.", e);
+      // Log the specific error from OpenAI if available
+      if (e.response?.data) {
+        logError(reqId, "OpenAI API Error Details:", e.response.data);
+      }
       return res.json(await runFallbackFlow());
     }
   } catch (err) {
