@@ -508,14 +508,35 @@ router.post("/travel", async (req, res) => {
       });
     }
 
+    /* ----------------- Split history vs current user turn ------------- */
+    // Use everything except the last user message as history; send the last user message as input.
+    // If last message isn't a user text, we send a small "continue" nudge.
+    let inputContent = { role: "user", parts: [{ text: "Continue." }] };
+    for (let i = convo.length - 1; i >= 0; i--) {
+      if (convo[i].role === "user" && convo[i].parts?.[0]?.text) {
+        inputContent = convo[i];
+        convo = convo.slice(0, i); // history is everything before this user turn
+        break;
+      }
+    }
+
+    // Start a chat session WITH tools + history (works on v1 with this SDK)
+    const chat = generativeModel.startChat({
+      tools: toolDeclarations,
+      history: convo, // prior messages
+    });
+
     /* --------------------------- AGENT LOOP -------------------------- */
     const MAX_TURNS = 5;
 
     for (let i = 0; i < MAX_TURNS; i++) {
-      const result = await generativeModel.generateContent({
-        contents: convo,
-        tools: toolDeclarations,
-      });
+      // Send the current user input (first turn) or a "continue" signal (subsequent turns)
+      const sendArg =
+        i === 0
+          ? { contents: [inputContent] }
+          : { contents: [{ role: "user", parts: [{ text: "continue" }] }] };
+
+      const result = await chat.sendMessage(sendArg);
 
       const choice = result?.response?.candidates?.[0];
       const assistantMessage = choice?.content;
@@ -539,9 +560,6 @@ router.post("/travel", async (req, res) => {
       const functionName = toolCall.name;
       const args = toolCall.args || {};
       logInfo(reqId, `AI wants to call tool: ${functionName}`, args);
-
-      // Add the model's tool request to history
-      convo.push({ role: "model", parts: [{ functionCall: toolCall }] });
 
       // Immediate UI signals
       if (functionName === "request_dates") {
@@ -597,18 +615,25 @@ router.post("/travel", async (req, res) => {
         });
       }
 
-      // Otherwise, add function response and loop again
-      convo.push({
-        role: "function",
-        parts: [
+      // Otherwise, add function response back to the chat and loop again
+      await chat.sendMessage({
+        contents: [
           {
-            functionResponse: {
-              name: functionName,
-              response: toolResult,
-            },
+            role: "function",
+            parts: [
+              {
+                functionResponse: {
+                  name: functionName,
+                  response: toolResult,
+                },
+              },
+            ],
           },
         ],
       });
+
+      // Update input for next turn
+      inputContent = { role: "user", parts: [{ text: "continue" }] };
     }
 
     logError(reqId, "Agent loop exceeded max turns.");
