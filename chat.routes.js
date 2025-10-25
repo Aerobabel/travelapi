@@ -20,9 +20,7 @@ const router = Router();
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
-// --- START OF MODIFIED CODE ---
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
-// --- END OF MODIFIED CODE ---
 
 const newReqId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
@@ -131,7 +129,6 @@ function extractDestination(text = "") {
 const FALLBACK_IMAGE_URL =
   "https://images.unsplash.com/photo-1501785888041-af3ef285b470?q=80&w=1470&auto=format&fit=crop";
 
-// --- START OF REPLACED FUNCTION ---
 async function pickPhoto(dest, reqId) {
   const cacheKey = (dest || "").toLowerCase().trim();
   if (!cacheKey) return FALLBACK_IMAGE_URL;
@@ -157,7 +154,7 @@ async function pickPhoto(dest, reqId) {
     }
     const data = await res.json();
     if (data.results && data.results.length > 0) {
-      const imageUrl = data.results[0].urls.regular; // 'regular' is 1080px wide
+      const imageUrl = data.results[0].urls.regular;
       logInfo(reqId, `Found image for "${dest}": ${imageUrl}`);
       imageCache.set(cacheKey, imageUrl);
       return imageUrl;
@@ -170,15 +167,15 @@ async function pickPhoto(dest, reqId) {
     return FALLBACK_IMAGE_URL;
   }
 }
-// --- END OF REPLACED FUNCTION ---
 
-
+// --- START OF MODIFIED CODE ---
 const tools = [
   {
     type: "function",
     function: {
       name: "request_dates",
-      description: "Need travel dates.",
+      // CHANGE: The description is now an explicit command for the AI.
+      description: "Call this function to ask the user for their desired travel dates. Use this when dates are unknown but required for planning.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -186,7 +183,8 @@ const tools = [
     type: "function",
     function: {
       name: "request_guests",
-      description: "Need traveler counts.",
+      // CHANGE: This is the key fix. The new description is a clear, direct instruction, telling the AI exactly when and why to use this tool.
+      description: "Call this function to ask the user how many people are traveling (e.g., adults, children). Use this when the number of guests is unknown and you need this information to create a plan.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -194,8 +192,8 @@ const tools = [
     type: "function",
     function: {
       name: "create_plan",
-      description:
-        "Return a full, detailed, day-by-day travel plan with a cost breakdown when destination, dates, and guests are known.",
+      // CHANGE: Slightly rephrased for clarity, ensuring it's only called when all prerequisite information is available.
+      description: "Call this function ONLY when the destination, dates, and number of guests are all known. It will return a full, detailed, day-by-day travel plan with a cost breakdown.",
       parameters: {
         type: "object",
         properties: {
@@ -268,6 +266,8 @@ const tools = [
     },
   },
 ];
+// --- END OF MODIFIED CODE ---
+
 
 const getSystemPrompt = (profile) => `You are a world-class, professional AI travel agent. Your goal is to create inspiring, comprehensive, and highly personalized travel plans.
 
@@ -275,7 +275,7 @@ const getSystemPrompt = (profile) => `You are a world-class, professional AI tra
 1.  **USE THE PROFILE:** Meticulously analyze the user profile below. Every part of the plan—activities, hotel style, flight class, budget—must reflect their stated preferences. In the plan's 'description' field, explicitly mention how you used their preferences (e.g., "An active solo trip focusing on museums, as requested.").
 2.  **HANDLE NEW REQUESTS:** After a plan is created (the user history will contain "[PLAN_SNAPSHOT]"), you MUST treat the next user message as a **brand new request**. Forget the previous destination and start the planning process over. If they say "now to China," you must start planning a trip to China.
 3.  **BE COMPREHENSIVE:** A real plan covers everything. Your generated itinerary must be detailed, spanning multiple days with at least 3-5 varied events per day (e.g., flights, transfers, meals at real local restaurants, tours, museum visits, relaxation time).
-4.  **STRICT DATA FORMAT:** You must call a function. Never respond with just text if you can call a function. Adhere perfectly to the function's JSON schema.
+4.  **STRICT DATA FORMAT:** You must call a function to get information or to create a plan. Never respond with just text if a function call is appropriate. Adhere perfectly to the function's JSON schema.
     -   \`weather.icon\`: Must be one of: "sunny", "partly-sunny", "cloudy".
     -   \`itinerary.date\`: MUST be in 'YYYY-MM-DD' format.
     -   \`itinerary.day\`: MUST be in 'Mon Day' format (e.g., 'Dec 26').
@@ -302,15 +302,22 @@ function deriveSlots(history = []) {
   return { destinationKnown: !!destination, destination, datesKnown, guestsKnown };
 }
 
-/** Normalize incoming messages to OpenAI's { role, content } format */
 function normalizeMessages(messages = []) {
-  const allowedRoles = new Set(["system", "user", "assistant"]);
+  const allowedRoles = new Set(["system", "user", "assistant", "tool"]);
   return messages
     .filter((m) => !m.hidden)
     .map((m) => {
-      const role = allowedRoles.has(m.role) ? m.role : "user";
-      const content = m.content ?? m.text ?? "";
-      return { role, content: String(content) };
+        // The new `tool` role has a different structure
+        if (m.role === 'tool') {
+            return {
+                role: 'tool',
+                tool_call_id: m.tool_call_id,
+                content: m.content
+            };
+        }
+        const role = allowedRoles.has(m.role) ? m.role : 'user';
+        const content = m.content ?? m.text ?? '';
+        return { role, content: String(content) };
     });
 }
 
@@ -366,9 +373,11 @@ router.post("/travel", async (req, res) => {
       });
 
       const choice = completion.choices?.[0];
-      const toolCall = choice?.message?.tool_calls?.[0];
+      const assistantMessage = choice?.message;
 
-      if (toolCall) {
+      // Check for tool calls first
+      if (assistantMessage?.tool_calls) {
+        const toolCall = assistantMessage.tool_calls[0];
         const functionName = toolCall.function?.name;
         logInfo(reqId, `AI called tool: ${functionName}`);
 
@@ -380,36 +389,45 @@ router.post("/travel", async (req, res) => {
           return res.json(await runFallbackFlow());
         }
 
+        // We need to return the assistant's message so the frontend can add it to the history
+        // for the subsequent tool response message.
+        const responsePayload = {
+            assistantMessage: {
+                ...assistantMessage,
+                content: assistantMessage.content || '', // Ensure content is not null
+            }
+        };
+
         if (functionName === "create_plan") {
           args.image = await pickPhoto(args.location, reqId);
           if (args.weather && !["sunny", "partly-sunny", "cloudy"].includes(args.weather.icon)) {
             args.weather.icon = "sunny";
           }
-          return res.json({
-            aiText: choice.message.content || "Here is your personalized plan!",
-            signal: { type: "planReady", payload: args },
-          });
+          responsePayload.signal = { type: "planReady", payload: args };
+          responsePayload.aiText = "Here is your personalized plan!";
+          return res.json(responsePayload);
         }
         if (functionName === "request_dates") {
-          return res.json({
-            aiText: choice.message.content || "When would you like to travel?",
-            signal: { type: "dateNeeded" },
-          });
+          responsePayload.signal = { type: "dateNeeded" };
+          responsePayload.aiText = "When would you like to travel?";
+          return res.json(responsePayload);
         }
         if (functionName === "request_guests") {
-          return res.json({
-            aiText: choice.message.content || "How many people are traveling?",
-            signal: { type: "guestsNeeded" },
-          });
+          responsePayload.signal = { type: "guestsNeeded" };
+          responsePayload.aiText = "How many people are traveling?";
+          return res.json(responsePayload);
         }
       }
 
-      if (choice?.message?.content) {
-        return res.json({ aiText: choice.message.content });
+      // If no tool call, but there is content, return it
+      if (assistantMessage?.content) {
+        return res.json({ aiText: assistantMessage.content });
       }
 
+      // If neither tool call nor content, use fallback
       logInfo(reqId, "AI did not call a tool or return text. Using fallback.");
       return res.json(await runFallbackFlow());
+
     } catch (e) {
       logError(reqId, "OpenAI API call failed. Responding with fallback flow.", e);
       return res.json(await runFallbackFlow());
