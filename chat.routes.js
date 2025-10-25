@@ -1,7 +1,7 @@
 // server/chat.routes.js
 import { Router } from "express";
 import OpenAI from "openai";
-import { getJson } from "serpapi"; // Import serpapi
+import { getJson } from "serpapi"; // ✅ SERP: Google Flights & Hotels
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -19,18 +19,23 @@ try {
 
 const router = Router();
 const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY);
-const hasSerpApiKey = Boolean(process.env.SERPAPI_API_KEY); // Check for SerpAPI key
+const hasSerpApiKey = Boolean(process.env.SERPAPI_API_KEY);
 
 const client = hasOpenAIKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
+// --- Assets / Caches ---
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
-
-const newReqId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
-const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
+const FALLBACK_IMAGE_URL =
+  "https://images.unsplash.com/photo-1501785888041-af3ef285b470?q=80&w=1470&auto=format&fit=crop";
 const userMem = new Map();
 const imageCache = new Map();
 
+// --- Utils / Logs ---
+const newReqId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
+const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
+
+// --- Memory/Profile ---
 const getMem = (userId) => {
   if (!userMem.has(userId)) {
     userMem.set(userId, {
@@ -102,6 +107,7 @@ function updateProfileFromHistory(messages, mem) {
   }
 }
 
+// --- Destination Extract ---
 const cityList = [
   "Paris",
   "London",
@@ -129,9 +135,7 @@ function extractDestination(text = "") {
   return null;
 }
 
-const FALLBACK_IMAGE_URL =
-  "https://images.unsplash.com/photo-1501785888041-af3ef285b470?q=80&w=1470&auto=format&fit=crop";
-
+// --- Image helper ---
 async function pickPhoto(dest, reqId) {
   const cacheKey = (dest || "").toLowerCase().trim();
   if (!cacheKey) return FALLBACK_IMAGE_URL;
@@ -140,7 +144,7 @@ async function pickPhoto(dest, reqId) {
     return imageCache.get(cacheKey);
   }
   logInfo(reqId, `[CACHE MISS] Fetching new image for "${dest}"`);
-  
+
   if (!UNSPLASH_ACCESS_KEY) {
     logError(reqId, "UNSPLASH_ACCESS_KEY is not set. Returning fallback image.");
     return FALLBACK_IMAGE_URL;
@@ -150,14 +154,16 @@ async function pickPhoto(dest, reqId) {
   const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=1&orientation=landscape`;
 
   try {
-    const res = await fetch(url, { headers: { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}` } });
+    const res = await fetch(url, {
+      headers: { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}` },
+    });
     if (!res.ok) {
       logError(reqId, `Unsplash API error: ${res.status} ${res.statusText}`);
       return FALLBACK_IMAGE_URL;
     }
     const data = await res.json();
     if (data.results && data.results.length > 0) {
-      const imageUrl = data.results[0].urls.regular; // 'regular' is 1080px wide
+      const imageUrl = data.results[0].urls.regular;
       logInfo(reqId, `Found image for "${dest}": ${imageUrl}`);
       imageCache.set(cacheKey, imageUrl);
       return imageUrl;
@@ -171,67 +177,7 @@ async function pickPhoto(dest, reqId) {
   }
 }
 
-// --- NEW: TOOL IMPLEMENTATIONS (FOR REAL DATA) ---
-const functionHandlers = {
-  request_dates: async () => ({}), // No external data needed
-  request_guests: async () => ({}), // No external data needed
-
-  search_flights: async ({ departure_airport, arrival_airport, departure_date, return_date }) => {
-    if (!hasSerpApiKey) return { error: "Flight search is unavailable. SERPAPI_API_KEY is not set." };
-    try {
-      const response = await getJson({
-        engine: "google_flights",
-        api_key: process.env.SERPAPI_API_KEY,
-        departure_id: departure_airport,
-        arrival_id: arrival_airport,
-        outbound_date: departure_date,
-        return_date: return_date,
-        currency: "USD",
-      });
-      const bestFlight = response.best_flights?.[0];
-      if (!bestFlight) return { flights: [] };
-      return {
-        flights: [{
-          price: bestFlight.price,
-          airline: bestFlight.flights[0].airline,
-          departure: `${bestFlight.flights[0].departure_airport.name} (${bestFlight.flights[0].departure_airport.id})`,
-          arrival: `${bestFlight.flights[0].arrival_airport.name} (${bestFlight.flights[0].arrival_airport.id})`,
-          total_duration: bestFlight.total_duration,
-        }],
-      };
-    } catch (e) {
-      logError("SERPAPI_FLIGHTS_ERROR", e.message);
-      return { error: "Could not retrieve flight information." };
-    }
-  },
-
-  search_hotels: async ({ location, check_in_date, check_out_date }) => {
-    if (!hasSerpApiKey) return { error: "Hotel search is unavailable. SERPAPI_API_KEY is not set." };
-    try {
-      const response = await getJson({
-        engine: "google_hotels",
-        api_key: process.env.SERPAPI_API_KEY,
-        q: `hotels in ${location}`,
-        check_in_date,
-        check_out_date,
-        currency: "USD",
-      });
-      const hotels = response.properties?.slice(0, 3).map(h => ({
-        name: h.name,
-        rating: h.overall_rating,
-        price: h.rate_per_night?.extracted_price,
-        description: h.description,
-      })) || [];
-      return { hotels };
-    } catch (e) {
-      logError("SERPAPI_HOTELS_ERROR", e.message);
-      return { error: "Could not retrieve hotel information." };
-    }
-  },
-
-  create_plan: async (args) => args, // This tool now just passes data through
-};
-
+// --- Tools exposed to the model ---
 const tools = [
   {
     type: "function",
@@ -253,14 +199,16 @@ const tools = [
     type: "function",
     function: {
       name: "search_flights",
-      description: "Search for real flights based on user criteria.",
+      description:
+        "Search for real flights based on user criteria via SERPAPI Google Flights. Return 1-3 best options with full legs, times, airlines, cabin, and total price.",
       parameters: {
         type: "object",
         properties: {
           departure_airport: { type: "string", description: "IATA code for departure, e.g., 'SFO'" },
           arrival_airport: { type: "string", description: "IATA code for arrival, e.g., 'CDG'" },
-          departure_date: { type: "string", description: "Format YYYY-MM-DD" },
-          return_date: { type: "string", description: "Format YYYY-MM-DD" },
+          departure_date: { type: "string", description: "YYYY-MM-DD" },
+          return_date: { type: "string", description: "YYYY-MM-DD" },
+          currency: { type: "string", description: "ISO currency code, e.g., 'USD'", default: "USD" },
         },
         required: ["departure_airport", "arrival_airport", "departure_date", "return_date"],
       },
@@ -270,13 +218,15 @@ const tools = [
     type: "function",
     function: {
       name: "search_hotels",
-      description: "Search for real hotels in a location for given dates.",
+      description:
+        "Search real hotels via SERPAPI Google Hotels for a location and date range. Return 3-5 concrete hotels with name, rating, price/night, address, and booking links if present.",
       parameters: {
         type: "object",
         properties: {
-          location: { type: "string", description: "The city to search for hotels in." },
-          check_in_date: { type: "string", description: "Format YYYY-MM-DD" },
-          check_out_date: { type: "string", description: "Format YYYY-MM-DD" },
+          location: { type: "string", description: "City or area to search hotels in." },
+          check_in_date: { type: "string", description: "YYYY-MM-DD" },
+          check_out_date: { type: "string", description: "YYYY-MM-DD" },
+          currency: { type: "string", description: "ISO currency code, e.g., 'USD'", default: "USD" },
         },
         required: ["location", "check_in_date", "check_out_date"],
       },
@@ -287,7 +237,7 @@ const tools = [
     function: {
       name: "create_plan",
       description:
-        "Return a full, detailed, day-by-day travel plan with a cost breakdown when destination, dates, and guests are known, and AFTER flights and hotels have been searched.",
+        "Return a full, detailed, day-by-day travel plan with a cost breakdown when destination, dates, and guests are known. MUST incorporate results of search_flights and search_hotels.",
       parameters: {
         type: "object",
         properties: {
@@ -336,14 +286,20 @@ const tools = [
                 provider: { type: "string" },
                 details: { type: "string" },
                 price: { type: "number" },
-                iconType: { type: "string", enum: ["image", "date", "plane", "hotel"] }, // Added plane and hotel
+                iconType: { type: "string", enum: ["image", "date", "plane", "hotel"] },
                 iconValue: {
                   type: "string",
-                  description: "A URL for the image OR 'Month Day' for date (e.g., 'Dec 26') OR airline name/hotel name",
+                  description:
+                    "URL for image OR 'Mon Day' for date (e.g., 'Dec 26') OR airline/hotel name for plane/hotel.",
                 },
               },
               required: ["item", "provider", "details", "price", "iconType", "iconValue"],
             },
+          },
+          // The model should include a `sources` field when possible with flight/hotel URLs.
+          sources: {
+            type: "array",
+            items: { type: "string" },
           },
         },
         required: [
@@ -361,25 +317,31 @@ const tools = [
   },
 ];
 
-const getSystemPrompt = (profile) => `You are a world-class, professional AI travel agent. Your goal is to create inspiring, comprehensive, and highly personalized travel plans using **real-world flight and hotel data from the search tools**.
+// --- System Prompt (strongly pushes concrete flight/hotel usage) ---
+const getSystemPrompt = (profile) => `You are a world-class, professional AI travel agent.
 
-**CRITICAL RULES:**
-1.  **GATHER INFO FIRST:** Do not invent information. First, use the 'request_dates' and 'request_guests' tools to get initial requirements from the user.
-2.  **SEARCH FIRST, THEN PLAN:** After gathering initial info, you MUST use the 'search_flights' and 'search_hotels' tools to find real options. Wait for the tool results before proceeding.
-3.  **USE SEARCH RESULTS:** When calling 'create_plan', explicitly incorporate details from the 'search_flights' and 'search_hotels' results into the itinerary and cost breakdown.
-4.  **USE THE PROFILE:** Meticulously analyze the user profile below. Every part of the plan—activities, hotel style, flight class, budget—must reflect their stated preferences. In the plan's 'description' field, explicitly mention how you used their preferences (e.g., "An active solo trip focusing on museums, as requested.").
-5.  **HANDLE NEW REQUESTS:** After a plan is created (the user history will contain "[PLAN_SNAPSHOT]"), you MUST treat the next user message as a **brand new request**. Forget the previous destination and start the planning process over. If they say "now to China," you must start planning a trip to China.
-6.  **BE COMPREHENSIVE:** A real plan covers everything. Your generated itinerary must be detailed, spanning multiple days with at least 3-5 varied events per day (e.g., flights, transfers, meals at real local restaurants, tours, museum visits, relaxation time).
-7.  **STRICT DATA FORMAT:** You must call a function. Never respond with just text if you can call a function. Adhere perfectly to the function's JSON schema.
-    -   \`weather.icon\`: Must be one of: "sunny", "partly-sunny", "cloudy".
-    -   \`itinerary.date\`: MUST be in 'YYYY-MM-DD' format.
-    -   \`itinerary.day\`: MUST be in 'Mon Day' format (e.g., 'Dec 26').
-    -   \`costBreakdown.iconType\`: Can now also be "plane" or "hotel" if related to flight/hotel bookings.
+GOAL: Create inspiring, comprehensive, and highly personalized travel plans using REAL flight and hotel data from the provided search tools.
 
-**USER PROFILE:**
+CRITICAL RULES
+1) GATHER INFO FIRST: Use 'request_dates' and 'request_guests' if dates or guest counts are missing.
+2) SEARCH FIRST, THEN PLAN: When dates/guests are known, MUST call 'search_flights' (round-trip) and 'search_hotels' for the user's city and dates BEFORE 'create_plan'.
+3) USE SEARCH RESULTS: The final plan (create_plan) MUST embed concrete details:
+   - Flights: airline + flight number (if available), departure/arrival airports (IATA), exact times, total duration, cabin, layovers. Pick the best 1-2 options aligned with preferences.
+   - Hotels: 3-5 named hotels with rating, neighborhood, price/night (converted to the currency requested), short why-it-fits rationale.
+   - Include these in the itinerary (arrival day: flight details and transfer; hotel check-in with hotel name; daily activities near the selected hotel).
+   - In 'costBreakdown', add flight and hotel line items with iconType "plane" and "hotel".
+4) PROFILE-ALIGNED: Activities, hotel style, cabin class, and budget must reflect the provided USER PROFILE. In 'description', explicitly say how profile guided the choices.
+5) STRICT DATA FORMAT:
+   - weather.icon ∈ {"sunny","partly-sunny","cloudy"}.
+   - itinerary.date: "YYYY-MM-DD".
+   - itinerary.day: "Mon Day" like "Dec 26".
+6) AFTER a plan is produced ([PLAN_SNAPSHOT] appears in history), treat any next user message as a brand new request.
+
+USER PROFILE:
 ${JSON.stringify(profile, null, 2)}
 `;
 
+// --- Snapshot / slot detection ---
 const lastSnapshotIdx = (h = []) => {
   for (let i = h.length - 1; i >= 0; i--) if (/\[plan_snapshot\]/i.test(h[i]?.text || "")) return i;
   return -1;
@@ -393,29 +355,23 @@ function deriveSlots(history = []) {
     .join("\n")
     .toLowerCase();
   const datesKnown = /📅|from\s+\d{4}-\d{2}-\d{2}\s+to\s+\d{4}-\d{2}-\d{2}/i.test(userTexts);
-  const guestsKnown = /👤|adult|children|kids|guests?|people/i.test(userTexts) && /\d/.test(userTexts);
+  const guestsKnown =
+    /👤|adult|children|kids|guests?|people/i.test(userTexts) && /\d/.test(userTexts);
   const destination = extractDestination(userTexts);
   return { destinationKnown: !!destination, destination, datesKnown, guestsKnown };
 }
 
-/** Normalize incoming messages to OpenAI's { role, content } format */
+// --- Message normalization (no tool msgs from client required) ---
 function normalizeMessages(messages = []) {
   const allowedRoles = new Set(["system", "user", "assistant", "tool"]);
   return messages
     .filter((m) => !m.hidden)
     .map((m) => {
-      if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
-        return {
-          role: 'assistant',
-          tool_calls: m.tool_calls
-        };
+      if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+        return { role: "assistant", tool_calls: m.tool_calls };
       }
-      if (m.role === 'tool' && m.tool_call_id) {
-        return {
-          role: 'tool',
-          tool_call_id: m.tool_call_id,
-          content: m.content || m.text || ''
-        };
+      if (m.role === "tool" && m.tool_call_id) {
+        return { role: "tool", tool_call_id: m.tool_call_id, content: m.content || m.text || "" };
       }
       const role = allowedRoles.has(m.role) ? m.role : "user";
       const content = m.content ?? m.text ?? "";
@@ -423,16 +379,119 @@ function normalizeMessages(messages = []) {
     });
 }
 
+// --- Server-side tool handlers (SERP) ---
+async function handleSearchFlights(args, reqId) {
+  if (!hasSerpApiKey) return { error: "Flight search unavailable: SERPAPI_API_KEY not set." };
+  try {
+    const resp = await getJson({
+      engine: "google_flights",
+      api_key: process.env.SERPAPI_API_KEY,
+      departure_id: args.departure_airport,
+      arrival_id: args.arrival_airport,
+      outbound_date: args.departure_date,
+      return_date: args.return_date,
+      currency: args.currency || "USD",
+    });
 
+    // Parse best 1-3 options
+    const collected = [];
+    const take = (resp.best_flights || []).slice(0, 3);
+    for (const opt of take) {
+      const price = opt.price;
+      const total_duration = opt.total_duration;
+      const legs = (opt.flights || []).map((f) => ({
+        airline: f.airline,
+        flight_number: f.flight_number,
+        cabin: f.cabin || null,
+        departure_airport: `${f.departure_airport?.name} (${f.departure_airport?.id})`,
+        arrival_airport: `${f.arrival_airport?.name} (${f.arrival_airport?.id})`,
+        departure_time: f.departure_time,
+        arrival_time: f.arrival_time,
+        duration: f.duration || null,
+      }));
+      collected.push({
+        price,
+        currency: args.currency || "USD",
+        total_duration,
+        legs,
+      });
+    }
+
+    // Fallback to other itineraries if best_flights empty
+    if (collected.length === 0 && Array.isArray(resp.other_flights)) {
+      for (const opt of resp.other_flights.slice(0, 2)) {
+        const legs = (opt.flights || []).map((f) => ({
+          airline: f.airline,
+          flight_number: f.flight_number,
+          cabin: f.cabin || null,
+          departure_airport: `${f.departure_airport?.name} (${f.departure_airport?.id})`,
+          arrival_airport: `${f.arrival_airport?.name} (${f.arrival_airport?.id})`,
+          departure_time: f.departure_time,
+          arrival_time: f.arrival_time,
+          duration: f.duration || null,
+        }));
+        collected.push({
+          price: opt.price,
+          currency: args.currency || "USD",
+          total_duration: opt.total_duration,
+          legs,
+        });
+      }
+    }
+
+    return { flights: collected };
+  } catch (e) {
+    logError(reqId, "SERPAPI_FLIGHTS_ERROR:", e.message);
+    return { error: "Could not retrieve flight information." };
+  }
+}
+
+async function handleSearchHotels(args, reqId) {
+  if (!hasSerpApiKey) return { error: "Hotel search unavailable: SERPAPI_API_KEY not set." };
+  try {
+    const resp = await getJson({
+      engine: "google_hotels",
+      api_key: process.env.SERPAPI_API_KEY,
+      q: `hotels in ${args.location}`,
+      check_in_date: args.check_in_date,
+      check_out_date: args.check_out_date,
+      currency: args.currency || "USD",
+    });
+
+    const props = Array.isArray(resp.properties) ? resp.properties.slice(0, 5) : [];
+    const hotels = props.map((h) => ({
+      name: h.name,
+      rating: h.overall_rating,
+      price_per_night: h.rate_per_night?.extracted_price,
+      currency: args.currency || "USD",
+      address: h.address,
+      neighborhood: h.neighborhood,
+      thumbnails: h.images?.slice?.(0, 1)?.map?.((img) => img.thumbnail) || [],
+      link: h.link, // if available
+      description: h.description,
+    }));
+
+    return { hotels };
+  } catch (e) {
+    logError(reqId, "SERPAPI_HOTELS_ERROR:", e.message);
+    return { error: "Could not retrieve hotel information." };
+  }
+}
+
+// --- Route ---
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
   try {
     const { messages = [], userId = "anonymous" } = req.body || {};
-    logInfo(reqId, `POST /chat/travel, user=${userId}, hasOpenAIKey=${hasOpenAIKey}, hasSerpApiKey=${hasSerpApiKey}, fetch=${FETCH_SOURCE}`);
+    logInfo(
+      reqId,
+      `POST /chat/travel, user=${userId}, hasOpenAIKey=${hasOpenAIKey}, hasSerpApiKey=${hasSerpApiKey}, fetch=${FETCH_SOURCE}`
+    );
     const mem = getMem(userId);
 
     updateProfileFromHistory(messages, mem);
 
+    // Fallback (no OpenAI key)
     const runFallbackFlow = async () => {
       const slots = deriveSlots(messages);
       logInfo(reqId, "Running fallback flow. Slots:", slots);
@@ -456,7 +515,10 @@ router.post("/travel", async (req, res) => {
         itinerary: [],
         costBreakdown: [],
       };
-      return { aiText: "The AI planner is temporarily unavailable, but here is a basic outline.", signal: { type: "planReady", payload } };
+      return {
+        aiText: "The AI planner is temporarily unavailable, but here is a basic outline.",
+        signal: { type: "planReady", payload },
+      };
     };
 
     if (!hasOpenAIKey) {
@@ -464,106 +526,105 @@ router.post("/travel", async (req, res) => {
       return res.json(await runFallbackFlow());
     }
 
+    // Prepare conversation & system prompt
     const systemPrompt = getSystemPrompt(mem.profile);
-    // Initial conversation context, including the system prompt
     let currentConvo = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
 
-    try {
-      const MAX_TOOL_CALL_ITERATIONS = 5; // Prevent infinite loops
-      for (let i = 0; i < MAX_TOOL_CALL_ITERATIONS; i++) {
-        const completion = await client.chat.completions.create({
-          model: "gpt-4o",
-          messages: currentConvo,
-          tools,
-          tool_choice: "auto",
-        });
+    // Server-side tool execution loop (no dangling tool_calls returned to client)
+    const MAX_TOOL_CALL_ITERATIONS = 6;
+    for (let i = 0; i < MAX_TOOL_CALL_ITERATIONS; i++) {
+      const completion = await client.chat.completions.create({
+        model: "gpt-4o",
+        messages: currentConvo,
+        tools,
+        tool_choice: "auto",
+      });
 
-        const choice = completion.choices?.[0];
-        const message = choice?.message;
+      const choice = completion.choices?.[0];
+      const message = choice?.message;
 
-        // If the AI provides a text response, we are done
-        if (message?.content && !message.tool_calls) { // Ensure no tool calls are present
-          return res.json({ aiText: message.content });
-        }
-
-        // If the AI calls a tool
-        if (message?.tool_calls && message.tool_calls.length > 0) {
-          currentConvo.push(message); // Add AI's tool call to conversation history
-
-          const toolCall = message.tool_calls[0]; // Process one tool at a time for simplicity
-          const functionName = toolCall.function?.name;
-          logInfo(reqId, `AI called tool: ${functionName}`);
-
-          let args = {};
-          try {
-            args = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
-          } catch (e) {
-            logError(reqId, "Failed to parse AI arguments, using fallback.", e);
-            return res.json(await runFallbackFlow());
-          }
-
-          // Execute the function (API calls, etc.)
-          const handler = functionHandlers[functionName];
-          if (!handler) {
-            throw new Error(`Unknown tool called: ${functionName}`);
-          }
-          const toolResult = await handler(args);
-
-          // ALWAYS add the tool response to the conversation history immediately
-          currentConvo.push({
-            tool_call_id: toolCall.id,
-            role: "tool",
-            content: JSON.stringify(toolResult),
-          });
-
-          // Now, handle immediate UI signals AFTER the tool result has been added to history
-          if (functionName === "request_dates") {
-            return res.json({
-              aiText: message.content || "When would you like to travel?",
-              signal: { type: "dateNeeded" },
-              assistantMessage: { role: 'assistant', tool_calls: [{ id: toolCall.id, type: 'function', function: { name: 'request_dates', arguments: JSON.stringify(args) } }] }
-            });
-          }
-          if (functionName === "request_guests") {
-            return res.json({
-              aiText: message.content || "How many people are traveling?",
-              signal: { type: "guestsNeeded" },
-              assistantMessage: { role: 'assistant', tool_calls: [{ id: toolCall.id, type: 'function', function: { name: 'request_guests', arguments: JSON.stringify(args) } }] }
-            });
-          }
-
-          // If the tool was create_plan, we're done!
-          if (functionName === "create_plan") {
-            logInfo(reqId, "Final plan created by AI.");
-            const payload = { ...toolResult };
-            payload.image = await pickPhoto(payload.location, reqId);
-            if (payload.weather && !["sunny", "partly-sunny", "cloudy"].includes(payload.weather.icon)) {
-              payload.weather.icon = "sunny"; // Default if AI gives invalid weather icon
-            }
-            return res.json({
-              aiText: message.content || "Here is your personalized travel plan!",
-              signal: { type: "planReady", payload },
-            });
-          }
-          
-          // For other tools (like search_flights, search_hotels), the loop continues.
-          // The next iteration of `client.chat.completions.create` will see the tool's output
-          // in `currentConvo`, allowing the AI to use that information.
-
-        } else {
-          // No tool call and no content, this shouldn't happen but log it
-          logInfo(reqId, "AI did not call a tool or return text. Using fallback.");
-          return res.json(await runFallbackFlow());
-        }
+      // If plain text from assistant and no tool calls -> return to client
+      if (message?.content && !message.tool_calls) {
+        return res.json({ aiText: message.content });
       }
 
-      logError(reqId, "Agent loop exceeded max tool call iterations.");
-      return res.status(500).json({ aiText: "I'm having trouble creating a plan right now. Please try simplifying your request." });
+      // If tools are called, handle the FIRST one synchronously and continue the loop
+      if (message?.tool_calls && message.tool_calls.length > 0) {
+        currentConvo.push(message); // push assistant tool-call message
+        const toolCall = message.tool_calls[0];
+        const functionName = toolCall.function?.name;
+        let args = {};
+        try {
+          args = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
+        } catch (e) {
+          logError(reqId, "Failed to parse tool arguments; aborting to fallback.", e);
+          return res.json(await runFallbackFlow());
+        }
 
-    } catch (e) {
-      logError(reqId, "OpenAI API call failed. Responding with fallback flow.", e);
+        logInfo(reqId, `AI called tool: ${functionName}`);
+
+        if (functionName === "request_dates") {
+          // return UI signal; do NOT add a tool result (no tool to execute)
+          return res.json({
+            aiText: message.content || "When would you like to travel?",
+            signal: { type: "dateNeeded" },
+          });
+        }
+
+        if (functionName === "request_guests") {
+          return res.json({
+            aiText: message.content || "How many people are traveling?",
+            signal: { type: "guestsNeeded" },
+          });
+        }
+
+        if (functionName === "search_flights") {
+          const toolResult = await handleSearchFlights(args, reqId);
+          currentConvo.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(toolResult),
+          });
+          continue; // let the model consume flight data and proceed
+        }
+
+        if (functionName === "search_hotels") {
+          const toolResult = await handleSearchHotels(args, reqId);
+          currentConvo.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(toolResult),
+          });
+          continue;
+        }
+
+        if (functionName === "create_plan") {
+          // Finalize the plan. We don't call a real tool, just enrich payload and return.
+          const payload = { ...args };
+          payload.image = await pickPhoto(payload.location, reqId);
+          if (payload.weather && !["sunny", "partly-sunny", "cloudy"].includes(payload.weather.icon)) {
+            payload.weather.icon = "sunny";
+          }
+          return res.json({
+            aiText: message.content || "Here is your personalized travel plan!",
+            signal: { type: "planReady", payload },
+          });
+        }
+
+        // Unknown tool name
+        logError(reqId, `Unknown tool called: ${functionName}`);
+        return res.json(await runFallbackFlow());
+      }
+
+      // Neither content nor tool_calls
+      logInfo(reqId, "Assistant returned no content and no tool calls; using fallback.");
       return res.json(await runFallbackFlow());
     }
+
+    logError(reqId, "Agent loop exceeded max tool call iterations.");
+    return res
+      .status(500)
+      .json({ aiText: "I'm having trouble creating a plan right now. Please try again." });
   } catch (err) {
     logError(reqId, `Critical handler error:`, err);
     return res.status(500).json({ aiText: "A critical server error occurred. Please try again." });
