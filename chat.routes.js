@@ -1,6 +1,6 @@
 // server/chat.routes.js
 import { Router } from "express";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import OpenAI from "openai";
 import { getJson } from "serpapi";
 import dotenv from "dotenv";
 
@@ -19,17 +19,13 @@ try {
 
 const router = Router();
 
-const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY);
+const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY);
 const hasSerpApiKey = Boolean(process.env.SERPAPI_API_KEY);
 
-// Use a supported model and avoid -latest aliases.
-const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-2.0-flash";
+const OPENAI_MODEL =
+  (process.env.OPENAI_MODEL || "").trim() || "gpt-4o-mini"; // fast + function-calling
 
-// Create client and model; force API v1 (old SDK defaults to v1beta).
-const genAI = hasGeminiKey ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
-const generativeModel = genAI
-  ? genAI.getGenerativeModel({ model: GEMINI_MODEL }, { apiVersion: "v1" })
-  : null;
+const client = hasOpenAIKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
@@ -193,8 +189,8 @@ async function pickPhoto(dest, reqId) {
 
 /* -------------------- REAL DATA TOOL IMPLEMENTATIONS ----------------- */
 const functionHandlers = {
-  request_dates: async () => ({}), // No external data needed
-  request_guests: async () => ({}), // No external data needed
+  request_dates: async () => ({}), // UI-only
+  request_guests: async () => ({}), // UI-only
 
   search_flights: async ({
     departure_airport,
@@ -260,222 +256,166 @@ const functionHandlers = {
     }
   },
 
-  create_plan: async (args) => args, // Pass-through, plan assembled upstream
+  create_plan: async (args) => args, // pass-through
 };
 
-/* --------------------- GEMINI TOOL DECLARATIONS ---------------------- */
-const toolDeclarations = [
+/* --------------------- OPENAI TOOL DECLARATIONS ---------------------- */
+const tools = [
   {
-    functionDeclarations: [
-      {
-        name: "request_dates",
-        description: "Call this to ask the user for their travel dates.",
-      },
-      {
-        name: "request_guests",
-        description: "Call this to ask the user how many people are traveling.",
-      },
-      {
-        name: "search_flights",
-        description: "Search for real flights based on user criteria.",
-        parameters: {
-          type: "object",
-          properties: {
-            departure_airport: {
-              type: "string",
-              description: "IATA code for departure, e.g., 'SFO'",
-            },
-            arrival_airport: {
-              type: "string",
-              description: "IATA code for arrival, e.g., 'CDG'",
-            },
-            departure_date: {
-              type: "string",
-              description: "Format YYYY-MM-DD",
-            },
-            return_date: { type: "string", description: "Format YYYY-MM-DD" },
-          },
-          required: [
-            "departure_airport",
-            "arrival_airport",
-            "departure_date",
-            "return_date",
-          ],
+    type: "function",
+    function: {
+      name: "request_dates",
+      description: "Ask the user for their travel dates.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "request_guests",
+      description: "Ask the user how many people are traveling.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_flights",
+      description: "Search for real flights based on user criteria.",
+      parameters: {
+        type: "object",
+        properties: {
+          departure_airport: { type: "string", description: "IATA, e.g., 'SFO'" },
+          arrival_airport: { type: "string", description: "IATA, e.g., 'CDG'" },
+          departure_date: { type: "string", description: "YYYY-MM-DD" },
+          return_date: { type: "string", description: "YYYY-MM-DD" },
         },
+        required: [
+          "departure_airport",
+          "arrival_airport",
+          "departure_date",
+          "return_date",
+        ],
       },
-      {
-        name: "search_hotels",
-        description: "Search for real hotels in a location for given dates.",
-        parameters: {
-          type: "object",
-          properties: {
-            location: {
-              type: "string",
-              description: "The city to search for hotels in.",
-            },
-            check_in_date: {
-              type: "string",
-              description: "Format YYYY-MM-DD",
-            },
-            check_out_date: {
-              type: "string",
-              description: "Format YYYY-MM-DD",
-            },
-          },
-          required: ["location", "check_in_date", "check_out_date"],
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_hotels",
+      description: "Search for real hotels in a location for given dates.",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string" },
+          check_in_date: { type: "string", description: "YYYY-MM-DD" },
+          check_out_date: { type: "string", description: "YYYY-MM-DD" },
         },
+        required: ["location", "check_in_date", "check_out_date"],
       },
-      {
-        name: "create_plan",
-        description:
-          "Call this ONLY when all information (flights, hotels, dates, etc.) has been gathered. It creates the final travel plan for the user.",
-        parameters: {
-          type: "object",
-          properties: {
-            location: { type: "string" },
-            country: { type: "string" },
-            dateRange: { type: "string" },
-            description: { type: "string" },
-            image: { type: "string" },
-            price: { type: "number" },
-            weather: {
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_plan",
+      description:
+        "Call ONLY when all info (flights, hotels, dates, etc.) is ready. Creates the final travel plan.",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string" },
+          country: { type: "string" },
+          dateRange: { type: "string" },
+          description: { type: "string" },
+          image: { type: "string" },
+          price: { type: "number" },
+          weather: {
+            type: "object",
+            properties: { temp: { type: "number" }, icon: { type: "string" } },
+          },
+          itinerary: {
+            type: "array",
+            items: {
               type: "object",
               properties: {
-                temp: { type: "number" },
-                icon: { type: "string" },
-              },
-            },
-            itinerary: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  date: { type: "string" },
-                  day: { type: "string" },
-                  events: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        type: { type: "string" },
-                        icon: { type: "string" },
-                        time: { type: "string" },
-                        duration: { type: "string" },
-                        title: { type: "string" },
-                        details: { type: "string" },
-                      },
+                date: { type: "string" },
+                day: { type: "string" },
+                events: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      type: { type: "string" },
+                      icon: { type: "string" },
+                      time: { type: "string" },
+                      duration: { type: "string" },
+                      title: { type: "string" },
+                      details: { type: "string" },
                     },
                   },
                 },
               },
             },
-            costBreakdown: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  item: { type: "string" },
-                  provider: { type: "string" },
-                  details: { type: "string" },
-                  price: { type: "number" },
-                  iconType: { type: "string" },
-                  iconValue: { type: "string" },
-                },
+          },
+          costBreakdown: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                item: { type: "string" },
+                provider: { type: "string" },
+                details: { type: "string" },
+                price: { type: "number" },
+                iconType: { type: "string" },
+                iconValue: { type: "string" },
               },
             },
           },
-          required: [
-            "location",
-            "country",
-            "dateRange",
-            "description",
-            "price",
-            "itinerary",
-            "costBreakdown",
-          ],
         },
+        required: [
+          "location",
+          "country",
+          "dateRange",
+          "description",
+          "price",
+          "itinerary",
+          "costBreakdown",
+        ],
       },
-    ],
+    },
   },
 ];
 
 /* ------------------------ SYSTEM INSTRUCTION ------------------------- */
 const getSystemPrompt = (profile) => `You are a world-class AI travel agent. Your goal is to create inspiring, personalized travel plans using real-world data.
 
-**CRITICAL RULES:**
-1.  **GATHER INFO FIRST:** Do not invent information. First, use the 'request_dates' and 'request_guests' tools to get requirements from the user. Then, use 'search_flights' and 'search_hotels' to find real options.
-2.  **USE THE PROFILE:** Analyze the user profile. The plan must reflect their preferences (travel type, budget, etc.).
-3.  **CREATE PLAN LAST:** Only after gathering all necessary information with the other tools, call 'create_plan' to assemble the final itinerary for the user.
-4.  **HANDLE NEW REQUESTS:** After a plan is created (history contains "[PLAN_SNAPSHOT]"), treat the next message as a new request and start the process over.
+CRITICAL RULES:
+1) GATHER INFO FIRST: Use 'request_dates' and 'request_guests' tools to collect dates and headcount. Then use 'search_flights' and 'search_hotels'.
+2) USE THE PROFILE: Reflect the user's preferences in the plan.
+3) CREATE PLAN LAST: Call 'create_plan' only after data is gathered.
+4) NEW REQUESTS: If history contains "[PLAN_SNAPSHOT]", treat the next message as a new request.
 
-**USER PROFILE:**
+USER PROFILE:
 ${JSON.stringify(profile, null, 2)}
 `;
 
-/* ------------------- GEMINI MESSAGE NORMALIZER ---------------------- */
-function normalizeToGemini(messages = []) {
-  const history = [];
-  let currentRole = "user";
-
-  // Start with the user's first message
-  const firstUserMsg = messages.find((m) => m.role === "user");
-  if (firstUserMsg) {
-    history.push({
-      role: "user",
-      parts: [{ text: firstUserMsg.content || firstUserMsg.text }],
-    });
-  }
-
-  // Process the rest
+/* ------------------- HISTORY NORMALIZER (OpenAI) --------------------- */
+function normalizeToOpenAI(messages = []) {
+  // Convert generic { role, content/text } into OpenAI chat messages
+  // We'll only include user & assistant textual turns; tool results will be appended during the loop
+  const out = [];
   for (const m of messages) {
-    if (m.hidden || m.role === "system") continue;
-
-    if (m.role === "assistant" || m.role === "ai") {
-      const toolCalls = m.tool_calls?.map((tc) => ({
-        id: tc.id,
-        functionCall: {
-          name: tc.function.name,
-          args: JSON.parse(tc.function.arguments || "{}"),
-        },
-      }));
-      history.push({
-        role: "model",
-        parts: toolCalls
-          ? [{ functionCall: toolCalls[0].functionCall }]
-          : [{ text: m.content || m.text || "" }],
-      });
-      currentRole = "model";
-    } else if (m.role === "tool") {
-      history.push({
-        role: "function",
-        parts: [
-          {
-            functionResponse: {
-              name: "unknown",
-              response: JSON.parse(m.content),
-            },
-          },
-        ],
-      });
-      currentRole = "function";
-    } else if (m.role === "user" && currentRole !== "user") {
-      // Avoid consecutive user messages in Gemini content
-      history.push({ role: "user", parts: [{ text: m.content || m.text }] });
-      currentRole = "user";
+    if (m.hidden) continue;
+    if (m.role === "system") continue;
+    if (m.role === "user") {
+      out.push({ role: "user", content: m.content || m.text || "" });
+    } else if (m.role === "assistant" || m.role === "ai") {
+      out.push({ role: "assistant", content: m.content || m.text || "" });
     }
+    // NOTE: 'tool' messages in your input history are not included; function calls will be new in this run
   }
-
-  // Fix names of function responses to match the prior functionCall
-  for (let i = 1; i < history.length; i++) {
-    if (history[i].role === "function" && history[i - 1].role === "model") {
-      const lastToolCall = history[i - 1].parts.find((p) => p.functionCall);
-      if (lastToolCall) {
-        history[i].parts[0].functionResponse.name = lastToolCall.functionCall.name;
-      }
-    }
-  }
-
-  return history;
+  return out;
 }
 
 /* --------------------------- ROUTES --------------------------------- */
@@ -485,10 +425,10 @@ router.post("/travel", async (req, res) => {
     const { messages = [], userId = "anonymous" } = req.body || {};
     logInfo(
       reqId,
-      `POST /chat/travel, user=${userId}, Gemini=${hasGeminiKey}, SerpApi=${hasSerpApiKey}, fetch=${FETCH_SOURCE}, model=${GEMINI_MODEL}`
+      `POST /chat/travel, user=${userId}, OpenAI=${hasOpenAIKey}, SerpApi=${hasSerpApiKey}, fetch=${FETCH_SOURCE}, model=${OPENAI_MODEL}`
     );
 
-    if (!hasGeminiKey || !generativeModel) {
+    if (!hasOpenAIKey || !client) {
       return res.status(500).json({ aiText: "The AI model is not configured." });
     }
 
@@ -496,144 +436,128 @@ router.post("/travel", async (req, res) => {
     updateProfileFromHistory(messages, mem);
 
     const systemPrompt = getSystemPrompt(mem.profile);
-    let convo = normalizeToGemini(messages);
+    const chatHistory = normalizeToOpenAI(messages);
 
-    // Prepend system instruction as a user message (Gemini pattern)
-    convo.unshift({ role: "user", parts: [{ text: `System Instruction: ${systemPrompt}` }] });
-    // Optional: Acknowledge system instruction
-    if (convo.length > 1) {
-      convo.splice(1, 0, {
-        role: "model",
-        parts: [{ text: "Understood. I will follow all instructions. How can I help?" }],
-      });
-    }
-
-    /* ----------------- Split history vs current user turn ------------- */
-    // Use everything except the last user message as history; send the last user message as input.
-    // If last message isn't a user text, we send a small "continue" nudge.
-    let inputContent = { role: "user", parts: [{ text: "Continue." }] };
-    for (let i = convo.length - 1; i >= 0; i--) {
-      if (convo[i].role === "user" && convo[i].parts?.[0]?.text) {
-        inputContent = convo[i];
-        convo = convo.slice(0, i); // history is everything before this user turn
-        break;
-      }
-    }
-
-    // Start a chat session WITH tools + history (works on v1 with this SDK)
-    const chat = generativeModel.startChat({
-      tools: toolDeclarations,
-      history: convo, // prior messages
-    });
+    // Ensure we always start with a system message to steer the model
+    const baseMessages = [{ role: "system", content: systemPrompt }, ...chatHistory];
 
     /* --------------------------- AGENT LOOP -------------------------- */
-    const MAX_TURNS = 5;
+    const MAX_TURNS = 6;
+    let loopMessages = [...baseMessages];
 
     for (let i = 0; i < MAX_TURNS; i++) {
-      // Send the current user input (first turn) or a "continue" signal (subsequent turns)
-      const sendArg =
-        i === 0
-          ? { contents: [inputContent] }
-          : { contents: [{ role: "user", parts: [{ text: "continue" }] }] };
-
-      const result = await chat.sendMessage(sendArg);
-
-      const choice = result?.response?.candidates?.[0];
-      const assistantMessage = choice?.content;
-
-      // Pull out any tool/function calls
-      const toolCalls =
-        assistantMessage?.parts
-          ?.filter((p) => p.functionCall)
-          ?.map((p) => p.functionCall) || [];
-
-      // If there are no tool calls, treat as final text
-      if (!toolCalls.length) {
-        const textResponse =
-          assistantMessage?.parts?.map((p) => p.text).join("") ||
-          "I'm sorry, I couldn't process that. Could you try again?";
-        return res.json({ aiText: textResponse });
-      }
-
-      // Process a single tool call at a time (simpler control flow)
-      const toolCall = toolCalls[0];
-      const functionName = toolCall.name;
-      const args = toolCall.args || {};
-      logInfo(reqId, `AI wants to call tool: ${functionName}`, args);
-
-      // Immediate UI signals
-      if (functionName === "request_dates") {
-        return res.json({
-          aiText: "When would you like to travel?",
-          signal: { type: "dateNeeded" },
-          assistantMessage: {
-            role: "assistant",
-            tool_calls: [
-              {
-                id: `call_${reqId}`,
-                type: "function",
-                function: { name: "request_dates", arguments: "{}" },
-              },
-            ],
-          },
-        });
-      }
-
-      if (functionName === "request_guests") {
-        return res.json({
-          aiText: "How many people will be traveling?",
-          signal: { type: "guestsNeeded" },
-          assistantMessage: {
-            role: "assistant",
-            tool_calls: [
-              {
-                id: `call_${reqId}`,
-                type: "function",
-                function: { name: "request_guests", arguments: "{}" },
-              },
-            ],
-          },
-        });
-      }
-
-      // Execute the function (API calls, etc.)
-      const handler = functionHandlers[functionName];
-      if (!handler) {
-        throw new Error(`Unknown tool called: ${functionName}`);
-      }
-      const toolResult = await handler(args);
-
-      // If the tool was create_plan, finalize and return
-      if (functionName === "create_plan") {
-        logInfo(reqId, "Final plan created by AI.");
-        const payload = { ...toolResult };
-        payload.image = await pickPhoto(payload.location, reqId);
-
-        return res.json({
-          aiText: "Here is your personalized travel plan!",
-          signal: { type: "planReady", payload },
-        });
-      }
-
-      // Otherwise, add function response back to the chat and loop again
-      await chat.sendMessage({
-        contents: [
-          {
-            role: "function",
-            parts: [
-              {
-                functionResponse: {
-                  name: functionName,
-                  response: toolResult,
-                },
-              },
-            ],
-          },
-        ],
+      const completion = await client.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages: loopMessages,
+        tools,
+        tool_choice: "auto",
+        temperature: 0.7,
       });
 
-      // Update input for next turn
-      inputContent = { role: "user", parts: [{ text: "continue" }] };
+      const msg = completion.choices?.[0]?.message;
+      const toolCalls = msg?.tool_calls || [];
+
+      // If assistant wants to call tools
+      if (toolCalls.length > 0) {
+        // Special-casing UI prompts first
+        for (const tc of toolCalls) {
+          const functionName = tc.function?.name;
+          if (functionName === "request_dates") {
+            return res.json({
+              aiText: "When would you like to travel?",
+              signal: { type: "dateNeeded" },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: tc.id || `call_${reqId}`,
+                    type: "function",
+                    function: { name: "request_dates", arguments: "{}" },
+                  },
+                ],
+              },
+            });
+          }
+          if (functionName === "request_guests") {
+            return res.json({
+              aiText: "How many people will be traveling?",
+              signal: { type: "guestsNeeded" },
+              assistantMessage: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: tc.id || `call_${reqId}`,
+                    type: "function",
+                    function: { name: "request_guests", arguments: "{}" },
+                  },
+                ],
+              },
+            });
+          }
+        }
+
+        // Execute tool calls and append their results
+        loopMessages.push({
+          role: "assistant",
+          content: msg.content || "",
+          tool_calls: toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function",
+            function: tc.function,
+          })),
+        });
+
+        for (const tc of toolCalls) {
+          const functionName = tc.function?.name;
+          const rawArgs = tc.function?.arguments || "{}";
+          let argsObj = {};
+          try {
+            argsObj = JSON.parse(rawArgs);
+          } catch (e) {
+            logError(reqId, `Bad tool args for ${functionName}:`, rawArgs);
+          }
+
+          const handler = functionHandlers[functionName];
+          if (!handler) {
+            logError(reqId, `Unknown tool: ${functionName}`);
+            continue;
+          }
+
+          const result = await handler(argsObj);
+
+          // If create_plan, finalize and return immediately
+          if (functionName === "create_plan") {
+            const payload = { ...result };
+            payload.image = await pickPhoto(payload.location, reqId);
+
+            return res.json({
+              aiText: "Here is your personalized travel plan!",
+              signal: { type: "planReady", payload },
+            });
+          }
+
+          loopMessages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: JSON.stringify(result),
+          });
+        }
+
+        // Continue the loop to let the model react to tool results
+        continue;
+      }
+
+      // No tool call → final assistant answer
+      const finalText = msg?.content?.trim();
+      if (finalText) {
+        return res.json({ aiText: finalText });
+      }
+
+      // Safety net: if nothing useful returned
+      return res.json({
+        aiText:
+          "I'm sorry, I couldn't process that right now. Could you try again with a bit more detail?",
+      });
     }
 
     logError(reqId, "Agent loop exceeded max turns.");
