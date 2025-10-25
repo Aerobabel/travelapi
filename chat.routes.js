@@ -22,12 +22,14 @@ const router = Router();
 const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY);
 const hasSerpApiKey = Boolean(process.env.SERPAPI_API_KEY);
 
-// Use a currently supported model (1.5 / 2.0 family). Avoid 1.0 and -latest aliases.
-const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-1.5-pro";
+// Use a supported model and avoid -latest aliases.
+const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-2.0-flash";
 
-// Create client and model (SDK v0.11 uses v1 by default)
+// Create client and model; force API v1 (old SDK defaults to v1beta).
 const genAI = hasGeminiKey ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
-const generativeModel = genAI ? genAI.getGenerativeModel({ model: GEMINI_MODEL }) : null;
+const generativeModel = genAI
+  ? genAI.getGenerativeModel({ model: GEMINI_MODEL }, { apiVersion: "v1" })
+  : null;
 
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
@@ -303,8 +305,7 @@ const toolDeclarations = [
       },
       {
         name: "search_hotels",
-        description:
-          "Search for real hotels in a location for given dates.",
+        description: "Search for real hotels in a location for given dates.",
         parameters: {
           type: "object",
           properties: {
