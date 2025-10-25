@@ -1,6 +1,7 @@
 // server/chat.routes.js
 import { Router } from "express";
 import OpenAI from "openai";
+import { getJson } from "serpapi"; // Import serpapi
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -17,8 +18,10 @@ try {
 }
 
 const router = Router();
-const hasKey = Boolean(process.env.OPENAI_API_KEY);
-const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY);
+const hasSerpApiKey = Boolean(process.env.SERPAPI_API_KEY); // Check for SerpAPI key
+
+const client = hasOpenAIKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 // --- START OF MODIFIED CODE ---
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
@@ -131,7 +134,6 @@ function extractDestination(text = "") {
 const FALLBACK_IMAGE_URL =
   "https://images.unsplash.com/photo-1501785888041-af3ef285b470?q=80&w=1470&auto=format&fit=crop";
 
-// --- START OF REPLACED FUNCTION ---
 async function pickPhoto(dest, reqId) {
   const cacheKey = (dest || "").toLowerCase().trim();
   if (!cacheKey) return FALLBACK_IMAGE_URL;
@@ -170,15 +172,74 @@ async function pickPhoto(dest, reqId) {
     return FALLBACK_IMAGE_URL;
   }
 }
-// --- END OF REPLACED FUNCTION ---
 
+// --- NEW: TOOL IMPLEMENTATIONS (FOR REAL DATA) ---
+const functionHandlers = {
+  request_dates: async () => ({}), // No external data needed
+  request_guests: async () => ({}), // No external data needed
+
+  search_flights: async ({ departure_airport, arrival_airport, departure_date, return_date }) => {
+    if (!hasSerpApiKey) return { error: "Flight search is unavailable. SERPAPI_API_KEY is not set." };
+    try {
+      const response = await getJson({
+        engine: "google_flights",
+        api_key: process.env.SERPAPI_API_KEY,
+        departure_id: departure_airport,
+        arrival_id: arrival_airport,
+        outbound_date: departure_date,
+        return_date: return_date,
+        currency: "USD",
+      });
+      const bestFlight = response.best_flights?.[0];
+      if (!bestFlight) return { flights: [] };
+      return {
+        flights: [{
+          price: bestFlight.price,
+          airline: bestFlight.flights[0].airline,
+          departure: `${bestFlight.flights[0].departure_airport.name} (${bestFlight.flights[0].departure_airport.id})`,
+          arrival: `${bestFlight.flights[0].arrival_airport.name} (${bestFlight.flights[0].arrival_airport.id})`,
+          total_duration: bestFlight.total_duration,
+        }],
+      };
+    } catch (e) {
+      logError("SERPAPI_FLIGHTS_ERROR", e.message);
+      return { error: "Could not retrieve flight information." };
+    }
+  },
+
+  search_hotels: async ({ location, check_in_date, check_out_date }) => {
+    if (!hasSerpApiKey) return { error: "Hotel search is unavailable. SERPAPI_API_KEY is not set." };
+    try {
+      const response = await getJson({
+        engine: "google_hotels",
+        api_key: process.env.SERPAPI_API_KEY,
+        q: `hotels in ${location}`,
+        check_in_date,
+        check_out_date,
+        currency: "USD",
+      });
+      const hotels = response.properties?.slice(0, 3).map(h => ({
+        name: h.name,
+        rating: h.overall_rating,
+        price: h.rate_per_night?.extracted_price,
+        description: h.description,
+      })) || [];
+      return { hotels };
+    } catch (e) {
+      logError("SERPAPI_HOTELS_ERROR", e.message);
+      return { error: "Could not retrieve hotel information." };
+    }
+  },
+
+  create_plan: async (args) => args, // This tool now just passes data through
+};
 
 const tools = [
   {
     type: "function",
     function: {
       name: "request_dates",
-      description: "Need travel dates.",
+      description: "Call this to ask the user for their travel dates.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -186,8 +247,41 @@ const tools = [
     type: "function",
     function: {
       name: "request_guests",
-      description: "Need traveler counts.",
+      description: "Call this to ask the user how many people are traveling.",
       parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_flights",
+      description: "Search for real flights based on user criteria.",
+      parameters: {
+        type: "object",
+        properties: {
+          departure_airport: { type: "string", description: "IATA code for departure, e.g., 'SFO'" },
+          arrival_airport: { type: "string", description: "IATA code for arrival, e.g., 'CDG'" },
+          departure_date: { type: "string", description: "Format YYYY-MM-DD" },
+          return_date: { type: "string", description: "Format YYYY-MM-DD" },
+        },
+        required: ["departure_airport", "arrival_airport", "departure_date", "return_date"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_hotels",
+      description: "Search for real hotels in a location for given dates.",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string", description: "The city to search for hotels in." },
+          check_in_date: { type: "string", description: "Format YYYY-MM-DD" },
+          check_out_date: { type: "string", description: "Format YYYY-MM-DD" },
+        },
+        required: ["location", "check_in_date", "check_out_date"],
+      },
     },
   },
   {
@@ -195,7 +289,7 @@ const tools = [
     function: {
       name: "create_plan",
       description:
-        "Return a full, detailed, day-by-day travel plan with a cost breakdown when destination, dates, and guests are known.",
+        "Return a full, detailed, day-by-day travel plan with a cost breakdown when destination, dates, and guests are known, and AFTER flights and hotels have been searched.",
       parameters: {
         type: "object",
         properties: {
@@ -244,10 +338,10 @@ const tools = [
                 provider: { type: "string" },
                 details: { type: "string" },
                 price: { type: "number" },
-                iconType: { type: "string", enum: ["image", "date"] },
+                iconType: { type: "string", enum: ["image", "date", "plane", "hotel"] }, // Added plane and hotel
                 iconValue: {
                   type: "string",
-                  description: "A URL for the image OR 'Month Day' for date (e.g., 'Dec 26')",
+                  description: "A URL for the image OR 'Month Day' for date (e.g., 'Dec 26') OR airline name/hotel name",
                 },
               },
               required: ["item", "provider", "details", "price", "iconType", "iconValue"],
@@ -269,16 +363,20 @@ const tools = [
   },
 ];
 
-const getSystemPrompt = (profile) => `You are a world-class, professional AI travel agent. Your goal is to create inspiring, comprehensive, and highly personalized travel plans.
+const getSystemPrompt = (profile) => `You are a world-class, professional AI travel agent. Your goal is to create inspiring, comprehensive, and highly personalized travel plans using **real-world flight and hotel data from the search tools**.
 
 **CRITICAL RULES:**
-1.  **USE THE PROFILE:** Meticulously analyze the user profile below. Every part of the plan—activities, hotel style, flight class, budget—must reflect their stated preferences. In the plan's 'description' field, explicitly mention how you used their preferences (e.g., "An active solo trip focusing on museums, as requested.").
-2.  **HANDLE NEW REQUESTS:** After a plan is created (the user history will contain "[PLAN_SNAPSHOT]"), you MUST treat the next user message as a **brand new request**. Forget the previous destination and start the planning process over. If they say "now to China," you must start planning a trip to China.
-3.  **BE COMPREHENSIVE:** A real plan covers everything. Your generated itinerary must be detailed, spanning multiple days with at least 3-5 varied events per day (e.g., flights, transfers, meals at real local restaurants, tours, museum visits, relaxation time).
-4.  **STRICT DATA FORMAT:** You must call a function. Never respond with just text if you can call a function. Adhere perfectly to the function's JSON schema.
+1.  **GATHER INFO FIRST:** Do not invent information. First, use the 'request_dates' and 'request_guests' tools to get initial requirements from the user.
+2.  **SEARCH FIRST, THEN PLAN:** After gathering initial info, you MUST use the 'search_flights' and 'search_hotels' tools to find real options. Wait for the tool results before proceeding.
+3.  **USE SEARCH RESULTS:** When calling 'create_plan', explicitly incorporate details from the 'search_flights' and 'search_hotels' results into the itinerary and cost breakdown.
+4.  **USE THE PROFILE:** Meticulously analyze the user profile below. Every part of the plan—activities, hotel style, flight class, budget—must reflect their stated preferences. In the plan's 'description' field, explicitly mention how you used their preferences (e.g., "An active solo trip focusing on museums, as requested.").
+5.  **HANDLE NEW REQUESTS:** After a plan is created (the user history will contain "[PLAN_SNAPSHOT]"), you MUST treat the next user message as a **brand new request**. Forget the previous destination and start the planning process over. If they say "now to China," you must start planning a trip to China.
+6.  **BE COMPREHENSIVE:** A real plan covers everything. Your generated itinerary must be detailed, spanning multiple days with at least 3-5 varied events per day (e.g., flights, transfers, meals at real local restaurants, tours, museum visits, relaxation time).
+7.  **STRICT DATA FORMAT:** You must call a function. Never respond with just text if you can call a function. Adhere perfectly to the function's JSON schema.
     -   \`weather.icon\`: Must be one of: "sunny", "partly-sunny", "cloudy".
     -   \`itinerary.date\`: MUST be in 'YYYY-MM-DD' format.
     -   \`itinerary.day\`: MUST be in 'Mon Day' format (e.g., 'Dec 26').
+    -   \`costBreakdown.iconType\`: Can now also be "plane" or "hotel" if related to flight/hotel bookings.
 
 **USER PROFILE:**
 ${JSON.stringify(profile, null, 2)}
@@ -304,21 +402,39 @@ function deriveSlots(history = []) {
 
 /** Normalize incoming messages to OpenAI's { role, content } format */
 function normalizeMessages(messages = []) {
-  const allowedRoles = new Set(["system", "user", "assistant"]);
+  const allowedRoles = new Set(["system", "user", "assistant", "tool"]); // Added 'tool' role
   return messages
     .filter((m) => !m.hidden)
     .map((m) => {
+      // Map tool_calls to 'assistant' role with tool_calls property
+      if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+        return {
+          role: 'assistant',
+          tool_calls: m.tool_calls
+        };
+      }
+      // Map tool_response to 'tool' role with tool_call_id and content
+      if (m.role === 'tool' && m.tool_call_id) {
+        return {
+          role: 'tool',
+          tool_call_id: m.tool_call_id,
+          content: m.content || m.text || ''
+        };
+      }
       const role = allowedRoles.has(m.role) ? m.role : "user";
       const content = m.content ?? m.text ?? "";
       return { role, content: String(content) };
     });
 }
 
+
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
+  // Store tool outputs for the current turn
+  const toolOutputs = {}; 
   try {
     const { messages = [], userId = "anonymous" } = req.body || {};
-    logInfo(reqId, `POST /chat/travel, user=${userId}, hasKey=${hasKey}, fetch=${FETCH_SOURCE}`);
+    logInfo(reqId, `POST /chat/travel, user=${userId}, hasOpenAIKey=${hasOpenAIKey}, hasSerpApiKey=${hasSerpApiKey}, fetch=${FETCH_SOURCE}`);
     const mem = getMem(userId);
 
     updateProfileFromHistory(messages, mem);
@@ -349,8 +465,8 @@ router.post("/travel", async (req, res) => {
       return { aiText: "The AI planner is temporarily unavailable, but here is a basic outline.", signal: { type: "planReady", payload } };
     };
 
-    if (!hasKey) {
-      logInfo(reqId, "No API key found. Responding with fallback flow.");
+    if (!hasOpenAIKey) {
+      logInfo(reqId, "No OpenAI API key found. Responding with fallback flow.");
       return res.json(await runFallbackFlow());
     }
 
@@ -358,58 +474,98 @@ router.post("/travel", async (req, res) => {
     const convo = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
 
     try {
-      const completion = await client.chat.completions.create({
-        model: "gpt-4o",
-        messages: convo,
-        tools,
-        tool_choice: "auto",
-      });
+      let currentConvo = [...convo]; // Create a mutable copy for the loop
+      const MAX_TOOL_CALL_ITERATIONS = 5; // Prevent infinite loops
+      for (let i = 0; i < MAX_TOOL_CALL_ITERATIONS; i++) {
+        const completion = await client.chat.completions.create({
+          model: "gpt-4o", // Using gpt-4o as it's excellent for tool use
+          messages: currentConvo,
+          tools,
+          tool_choice: "auto",
+        });
 
-      const choice = completion.choices?.[0];
-      const toolCall = choice?.message?.tool_calls?.[0];
+        const choice = completion.choices?.[0];
+        const message = choice?.message;
 
-      if (toolCall) {
-        const functionName = toolCall.function?.name;
-        logInfo(reqId, `AI called tool: ${functionName}`);
+        // If the AI provides a text response, we are done
+        if (message?.content) {
+          return res.json({ aiText: message.content });
+        }
 
-        let args = {};
-        try {
-          args = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
-        } catch (e) {
-          logError(reqId, "Failed to parse AI arguments, using fallback.", e);
+        // If the AI calls a tool
+        if (message?.tool_calls && message.tool_calls.length > 0) {
+          currentConvo.push(message); // Add AI's tool call to conversation history
+
+          const toolCall = message.tool_calls[0]; // Process one tool at a time for simplicity
+          const functionName = toolCall.function?.name;
+          logInfo(reqId, `AI called tool: ${functionName}`);
+
+          let args = {};
+          try {
+            args = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
+          } catch (e) {
+            logError(reqId, "Failed to parse AI arguments, using fallback.", e);
+            return res.json(await runFallbackFlow());
+          }
+
+          // Handle simple UI signals immediately
+          if (functionName === "request_dates") {
+            return res.json({
+              aiText: message.content || "When would you like to travel?",
+              signal: { type: "dateNeeded" },
+              // Include the tool call in assistantMessage for frontend to track if needed
+              assistantMessage: { role: 'assistant', tool_calls: [{ id: toolCall.id, type: 'function', function: { name: 'request_dates', arguments: JSON.stringify(args) } }] }
+            });
+          }
+          if (functionName === "request_guests") {
+            return res.json({
+              aiText: message.content || "How many people are traveling?",
+              signal: { type: "guestsNeeded" },
+              // Include the tool call in assistantMessage for frontend to track if needed
+              assistantMessage: { role: 'assistant', tool_calls: [{ id: toolCall.id, type: 'function', function: { name: 'request_guests', arguments: JSON.stringify(args) } }] }
+            });
+          }
+
+          // Execute the function (API calls, etc.)
+          const handler = functionHandlers[functionName];
+          if (!handler) {
+            throw new Error(`Unknown tool called: ${functionName}`);
+          }
+          const toolResult = await handler(args);
+          toolOutputs[functionName] = toolResult; // Store tool output
+
+          // Add tool response to conversation history
+          currentConvo.push({
+            tool_call_id: toolCall.id,
+            role: "tool",
+            content: JSON.stringify(toolResult),
+          });
+
+          // If the tool was create_plan, we're done!
+          if (functionName === "create_plan") {
+            logInfo(reqId, "Final plan created by AI.");
+            const payload = { ...toolResult };
+            payload.image = await pickPhoto(payload.location, reqId);
+            if (payload.weather && !["sunny", "partly-sunny", "cloudy"].includes(payload.weather.icon)) {
+              payload.weather.icon = "sunny"; // Default if AI gives invalid weather icon
+            }
+            return res.json({
+              aiText: message.content || "Here is your personalized travel plan!",
+              signal: { type: "planReady", payload },
+            });
+          }
+          // If it's a search tool, loop again to let AI process results and decide next step (e.g., create_plan)
+          // The loop will continue, and the AI will see the tool output in the `currentConvo`
+        } else {
+          // No tool call and no content, this shouldn't happen but log it
+          logInfo(reqId, "AI did not call a tool or return text. Using fallback.");
           return res.json(await runFallbackFlow());
         }
-
-        if (functionName === "create_plan") {
-          args.image = await pickPhoto(args.location, reqId);
-          if (args.weather && !["sunny", "partly-sunny", "cloudy"].includes(args.weather.icon)) {
-            args.weather.icon = "sunny";
-          }
-          return res.json({
-            aiText: choice.message.content || "Here is your personalized plan!",
-            signal: { type: "planReady", payload: args },
-          });
-        }
-        if (functionName === "request_dates") {
-          return res.json({
-            aiText: choice.message.content || "When would you like to travel?",
-            signal: { type: "dateNeeded" },
-          });
-        }
-        if (functionName === "request_guests") {
-          return res.json({
-            aiText: choice.message.content || "How many people are traveling?",
-            signal: { type: "guestsNeeded" },
-          });
-        }
       }
 
-      if (choice?.message?.content) {
-        return res.json({ aiText: choice.message.content });
-      }
+      logError(reqId, "Agent loop exceeded max tool call iterations.");
+      return res.status(500).json({ aiText: "I'm having trouble creating a plan right now. Please try simplifying your request." });
 
-      logInfo(reqId, "AI did not call a tool or return text. Using fallback.");
-      return res.json(await runFallbackFlow());
     } catch (e) {
       logError(reqId, "OpenAI API call failed. Responding with fallback flow.", e);
       return res.json(await runFallbackFlow());
