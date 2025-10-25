@@ -10,7 +10,7 @@ const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
-const SERP_API_KEY = process.env.SERP_API_KEY;
+const SERP_API_KEY = process.env.SERPAPI_API_KEY;
 
 const newReqId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
