@@ -30,6 +30,7 @@ const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 const newReqId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
+const logWarn = (reqId, ...args) => console.warn(`[chat][${reqId}]`, ...args);
 const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
 
 /* --------------------------- IN-MEMORY DB ---------------------------- */
@@ -118,12 +119,11 @@ async function pickPhoto(dest, reqId) {
   const cacheKey = (dest || "").toLowerCase().trim();
   if (!cacheKey) return FALLBACK_IMAGE_URL;
   if (imageCache.has(cacheKey)) {
-    logInfo(reqId, `[CACHE HIT] Serving image for "${dest}"`);
+    logInfo(reqId, `[CACHE HIT] image "${dest}"`);
     return imageCache.get(cacheKey);
   }
-  logInfo(reqId, `[CACHE MISS] Fetching new image for "${dest}"`);
   if (!UNSPLASH_ACCESS_KEY) {
-    logError(reqId, "UNSPLASH_ACCESS_KEY is not set. Returning fallback image.");
+    logWarn(reqId, "UNSPLASH_ACCESS_KEY missing, using fallback image.");
     return FALLBACK_IMAGE_URL;
   }
   const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(
@@ -132,33 +132,29 @@ async function pickPhoto(dest, reqId) {
   try {
     const res = await fetch(url, { headers: { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}` } });
     if (!res.ok) {
-      logError(reqId, `Unsplash API error: ${res.status} ${res.statusText}`);
+      logWarn(reqId, `Unsplash API ${res.status} ${res.statusText}`);
       return FALLBACK_IMAGE_URL;
     }
     const data = await res.json();
-    if (data.results?.length > 0) {
-      const imageUrl = data.results[0].urls.regular;
-      imageCache.set(cacheKey, imageUrl);
-      return imageUrl;
-    }
-    return FALLBACK_IMAGE_URL;
+    const imageUrl = data?.results?.[0]?.urls?.regular || FALLBACK_IMAGE_URL;
+    imageCache.set(cacheKey, imageUrl);
+    return imageUrl;
   } catch (e) {
-    logError(reqId, "Failed to fetch from Unsplash API", e.message);
+    logWarn(reqId, "Unsplash error:", e?.message || e);
     return FALLBACK_IMAGE_URL;
   }
 }
 
-function parseISO(dateStr) {
-  const d = new Date(dateStr);
+const fmtYMD = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const shortMonthDay = (d) =>
+  new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(d); // "Oct 1"
+
+function parseISO(s) {
+  const d = new Date(s);
   return isNaN(d) ? null : d;
 }
-function fmtYMD(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-function shortMonthDay(d) {
-  const fmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
-  return fmt.format(d); // e.g., "Oct 1"
-}
+
 function expandDateRangeToDates(startYMD, endYMD) {
   const start = parseISO(startYMD);
   const end = parseISO(endYMD);
@@ -171,7 +167,6 @@ function expandDateRangeToDates(startYMD, endYMD) {
 }
 
 /* -------------------------- WEATHER (Open-Meteo) --------------------- */
-/** Returns { temp: number, icon: "sunny"|"partly-sunny"|"cloudy" } using forecast; falls back to climate means */
 async function fetchWeatherSummary(city, startYMD, reqId) {
   try {
     const g = await fetch(
@@ -181,7 +176,6 @@ async function fetchWeatherSummary(city, startYMD, reqId) {
     if (!loc) return null;
 
     const { latitude, longitude, timezone } = loc;
-
     const forecastUrl =
       `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}` +
       `&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=${encodeURIComponent(
@@ -189,21 +183,22 @@ async function fetchWeatherSummary(city, startYMD, reqId) {
       )}&start_date=${startYMD}&end_date=${startYMD}`;
     const f = await fetch(forecastUrl).then((r) => r.json());
 
-    let avg = null;
-    let icon = null;
     const tmax = f?.daily?.temperature_2m_max?.[0];
     const tmin = f?.daily?.temperature_2m_min?.[0];
     const code = f?.daily?.weathercode?.[0];
-    if (typeof tmax === "number" && typeof tmin === "number") {
-      avg = Math.round((tmax + tmin) / 2);
-    }
+
+    let avg = null;
+    if (typeof tmax === "number" && typeof tmin === "number") avg = Math.round((tmax + tmin) / 2);
+
+    let icon = null;
     if (typeof code === "number") {
-      if ([0].includes(code)) icon = "sunny";
+      if (code === 0) icon = "sunny";
       else if ([1, 2, 3].includes(code)) icon = "partly-sunny";
       else icon = "cloudy";
     }
     if (avg != null && icon) return { temp: avg, icon };
 
+    // Climate fallback
     const month = new Date(startYMD).getMonth() + 1;
     const climateUrl =
       `https://climate-api.open-meteo.com/v1/climate?latitude=${latitude}&longitude=${longitude}` +
@@ -212,18 +207,16 @@ async function fetchWeatherSummary(city, startYMD, reqId) {
     const tmean = c?.daily?.temperature_2m_mean?.[0];
     if (typeof tmean === "number") {
       const t = Math.round(tmean);
-      const icon2 = t >= 24 ? "sunny" : t >= 10 ? "partly-sunny" : "cloudy";
-      return { temp: t, icon: icon2 };
+      return { temp: t, icon: t >= 24 ? "sunny" : t >= 10 ? "partly-sunny" : "cloudy" };
     }
     return null;
   } catch (e) {
-    logError(reqId, "WEATHER_ERROR", e?.message || e);
+    logWarn(reqId, "WEATHER_ERROR", e?.message || e);
     return null;
   }
 }
 
 /* ---------------------------- SERP TOOLS ----------------------------- */
-// Note: serpapi@1.1.1 signature is getJson(engine, params)
 async function serpFlights(params, reqId) {
   if (!hasSerpKey) return { error: "Flight search unavailable." };
   try {
@@ -251,7 +244,7 @@ async function serpFlights(params, reqId) {
       ],
     };
   } catch (e) {
-    logError(reqId, "SERPAPI_FLIGHTS_ERROR", e?.message || e);
+    logWarn(reqId, "SERPAPI_FLIGHTS_ERROR", e?.message || e);
     return { error: "Could not retrieve flight information." };
   }
 }
@@ -277,13 +270,12 @@ async function serpHotels(params, reqId) {
       })) || [];
     return { hotels };
   } catch (e) {
-    logError(reqId, "SERPAPI_HOTELS_ERROR", e?.message || e);
+    logWarn(reqId, "SERPAPI_HOTELS_ERROR", e?.message || e);
     return { error: "Could not retrieve hotel information." };
   }
 }
 
 /* ---------------------------- OPENAI TOOLS --------------------------- */
-// Conversational slot filling tools (emit UI signals) + silent data tools + finalizer
 const tools = [
   { type: "function", function: { name: "request_destination", description: "Ask which city/country the user wants to visit.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "request_dates", description: "Ask for start and end dates (YYYY-MM-DD).", parameters: { type: "object", properties: {} } } },
@@ -296,7 +288,7 @@ const tools = [
     type: "function",
     function: {
       name: "search_flights",
-      description: "Look up flights via SerpAPI (silent). Do not dump results; summarize into plan later.",
+      description: "Look up flights via SerpAPI (silent). Do not dump results; summarize later.",
       parameters: {
         type: "object",
         properties: {
@@ -314,7 +306,7 @@ const tools = [
     type: "function",
     function: {
       name: "search_hotels",
-      description: "Look up hotels via SerpAPI (silent). Do not dump results; summarize into plan later.",
+      description: "Look up hotels via SerpAPI (silent). Do not dump results; summarize later.",
       parameters: {
         type: "object",
         properties: {
@@ -344,7 +336,7 @@ const tools = [
     function: {
       name: "create_plan",
       description:
-        "Create the final plan only after all key slots are known (destination, dates, guests, budget, departure, preferences).",
+        "Create final plan after all slots (destination, dates, guests, budget, departure, preferences) are known.",
       parameters: {
         type: "object",
         properties: {
@@ -415,7 +407,7 @@ CORE PRINCIPLES
 - CONVERSATION FIRST: Ask one friendly question at a time to fill missing info: destination, dates, guests, budget (amount & currency) per person, departure city/airport, and preferences (style, interests, hotel vibe).
 - NO DUMPING: Do not list raw flights/hotels unless user asks. Use results silently to craft a plan.
 - DATES: In the itinerary, use actual calendar dates (YYYY-MM-DD) and also a display field like "Oct 1".
-- WEATHER: Always include a weather summary for the start date using get_weather (icon ∈ {sunny, partly-sunny, cloudy} + average temp in °C).
+- WEATHER: Always include weather for the start date using get_weather (icon ∈ {sunny, partly-sunny, cloudy} + average temp in °C).
 - ITINERARY QUALITY: For EACH day, 3–5 concrete events with times, realistic venues/areas, breaks/meals, and transfers. Vary activities based on preferences.
 - PROFILE ADAPTATION: Reflect the user's profile in the plan; mention how it influenced choices in the description.
 - FINALIZATION: Only call create_plan when all key slots are captured.
@@ -434,6 +426,15 @@ function normalizeMessages(messages = []) {
     out.push({ role, content: String(m.content ?? m.text ?? "") });
   }
   return out;
+}
+
+/* --------------------------- TIMEOUT HELPERS ------------------------- */
+function withTimeout(promise, ms, label, reqId) {
+  let t;
+  const timeout = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
 }
 
 /* ------------------------------ ROUTE -------------------------------- */
@@ -456,7 +457,7 @@ router.post("/travel", async (req, res) => {
     const systemPrompt = getSystemPrompt(mem.profile);
     const base = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
 
-    // Nudge: if any slots are missing, ask via request_* tools
+    // Nudge the model to use the right tool quickly (prevents rambling)
     const nudger = {
       role: "system",
       content:
@@ -469,23 +470,31 @@ router.post("/travel", async (req, res) => {
         "Only after all are known, silently use search_flights, search_hotels, get_weather, then call create_plan.",
     };
 
-    const MAX_TURNS = 8;
+    const MAX_TURNS = 3;              // keep responsive
+    const OPENAI_TIMEOUT_MS = 25000;  // 25s per turn
+
     let loopMessages = [...base, nudger];
 
     for (let turn = 0; turn < MAX_TURNS; turn++) {
-      const completion = await client.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages: loopMessages,
-        tools,
-        tool_choice: "auto",
-        temperature: 0.7,
-      });
+      const completion = await withTimeout(
+        client.chat.completions.create({
+          model: OPENAI_MODEL,
+          messages: loopMessages,
+          tools,
+          tool_choice: "auto",
+          temperature: 0.7,
+        }),
+        OPENAI_TIMEOUT_MS,
+        "OpenAI completion",
+        reqId
+      );
 
       const msg = completion.choices?.[0]?.message;
       const toolCalls = msg?.tool_calls || [];
 
+      // If the model called tools
       if (toolCalls.length > 0) {
-        // Add assistant tool-call marker
+        // Record assistant tool-calls for traceability
         loopMessages.push({
           role: "assistant",
           content: msg.content || "",
@@ -496,7 +505,7 @@ router.post("/travel", async (req, res) => {
           })),
         });
 
-        // UI request tools -> return with proper assistantMessage.tool_calls for your frontend
+        // Handle UI ask-tools immediately so your frontend can render pickers
         for (const tc of toolCalls) {
           const fn = tc.function?.name;
 
@@ -603,53 +612,42 @@ router.post("/travel", async (req, res) => {
         // Execute silent tools or finalize plan
         for (const tc of toolCalls) {
           const fn = tc.function?.name;
-          const rawArgs = tc.function?.arguments || "{}";
           let args = {};
           try {
-            args = JSON.parse(rawArgs);
+            args = JSON.parse(tc.function?.arguments || "{}");
           } catch (e) {
-            logError(reqId, `Bad tool args for ${fn}`, rawArgs);
+            logWarn(reqId, `Bad tool args for ${fn}`, tc.function?.arguments);
           }
 
           if (fn === "search_flights") {
             const result = await serpFlights(args, reqId);
-            loopMessages.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: JSON.stringify(result ?? {}),
-            });
+            loopMessages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result ?? {}) });
           } else if (fn === "search_hotels") {
             const result = await serpHotels(args, reqId);
-            loopMessages.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: JSON.stringify(result ?? {}),
-            });
+            loopMessages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result ?? {}) });
           } else if (fn === "get_weather") {
             const result = await fetchWeatherSummary(args.location, args.start_date, reqId);
-            loopMessages.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: JSON.stringify(result ?? {}),
-            });
+            loopMessages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result ?? {}) });
           } else if (fn === "create_plan") {
-            // Server-side normalization & emission with assistantMessage.tool_calls for your UI
+            // Normalize and return plan immediately
             const { dateRange, location } = args || {};
             let startYMD = null;
             let endYMD = null;
             if (dateRange && /to/i.test(dateRange)) {
               const [a, b] = dateRange.split(/to/i).map((s) => s.trim());
-              startYMD = fmtYMD(parseISO(a) || new Date(a));
-              endYMD = fmtYMD(parseISO(b) || new Date(b));
+              const aD = parseISO(a);
+              const bD = parseISO(b);
+              startYMD = aD ? fmtYMD(aD) : a;
+              endYMD = bD ? fmtYMD(bD) : b;
             }
 
-            const image = await pickPhoto(location, reqId);
+            const image = await withTimeout(pickPhoto(location, reqId), 7000, "Unsplash", reqId).catch(() => FALLBACK_IMAGE_URL);
 
             // Ensure weather present
             let weather = args.weather;
             if (!weather || typeof weather.temp !== "number" || !["sunny", "partly-sunny", "cloudy"].includes(weather.icon)) {
               if (startYMD) {
-                const w = await fetchWeatherSummary(location, startYMD, reqId);
+                const w = await withTimeout(fetchWeatherSummary(location, startYMD, reqId), 8000, "Weather", reqId).catch(() => null);
                 if (w) weather = w;
               }
               if (!weather) weather = { temp: 22, icon: "partly-sunny" };
@@ -671,12 +669,7 @@ router.post("/travel", async (req, res) => {
               }));
             }
 
-            const payload = {
-              ...args,
-              image,
-              weather,
-              itinerary,
-            };
+            const payload = { ...args, image, weather, itinerary };
 
             return res.json({
               aiText: "Here’s your personalized travel plan!",
@@ -687,10 +680,7 @@ router.post("/travel", async (req, res) => {
                   {
                     id: `call_${reqId}`,
                     type: "function",
-                    function: {
-                      name: "create_plan",
-                      arguments: JSON.stringify(payload),
-                    },
+                    function: { name: "create_plan", arguments: JSON.stringify(payload) },
                   },
                 ],
               },
@@ -698,29 +688,39 @@ router.post("/travel", async (req, res) => {
           }
         }
 
-        // Continue model loop after tool results
+        // After executing tools once, do ONE more turn to let the model conclude quickly
         continue;
       }
 
-      // No tools called → plain conversational reply
+      // No tools called → conversational message
       const finalText = msg?.content?.trim();
-      if (finalText) return res.json({ aiText: finalText });
+      if (finalText) {
+        return res.json({
+          aiText: finalText,
+          assistantMessage: { role: "assistant" },
+        });
+      }
 
       // Safety net
       return res.json({
         aiText:
           "Could you share destination, dates, guests, budget (per person & currency), and departure city so I can craft a perfect plan?",
+        assistantMessage: { role: "assistant" },
       });
     }
 
-    logError(reqId, "Agent loop exceeded max turns.");
-    return res.status(500).json({
+    logWarn(reqId, "Agent loop hit max turns");
+    return res.status(200).json({
       aiText:
-        "I'm having trouble creating the plan right now. Share one detail at a time (destination, dates, guests, budget, departure), and we’ll build it together.",
+        "Got a lot to consider! Tell me your destination, dates, guests, budget (per person & currency), and departure city — I’ll take it from there.",
+      assistantMessage: { role: "assistant" },
     });
   } catch (err) {
     logError(reqId, "Critical handler error:", err);
-    return res.status(500).json({ aiText: "A critical server error occurred. Please try again." });
+    return res.status(500).json({
+      aiText: "A critical server error occurred. Please try again.",
+      assistantMessage: { role: "assistant" },
+    });
   }
 });
 
