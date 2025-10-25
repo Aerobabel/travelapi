@@ -21,7 +21,6 @@ const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
-const SERP_API_KEY = process.env.SERPAPI_API_KEY; // New: Environment variable for SERP API key
 
 const newReqId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
@@ -169,60 +168,13 @@ async function pickPhoto(dest, reqId) {
   }
 }
 
-// New: Function to perform a web search
-async function performSearch(query, reqId) {
-  logInfo(reqId, `Performing web search for: "${query}"`);
-  if (!SERP_API_KEY) {
-    logError(reqId, "SERP_API_KEY is not set. Cannot perform web search.");
-    return JSON.stringify({ error: "SERP API key not configured." });
-  }
-
-  // Example using Serper.dev. You might use SerpApi, Google Custom Search, etc.
-  // Adjust the URL and parsing based on your chosen provider.
-  const searchUrl = `https://api.serper.dev/search`; 
-  
-  try {
-    const res = await fetch(searchUrl, {
-      method: 'POST',
-      headers: {
-        'X-API-KEY': SERP_API_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ q: query }),
-    });
-
-    if (!res.ok) {
-      logError(reqId, `SERP API error: ${res.status} ${res.statusText}`);
-      return JSON.stringify({ error: `SERP API error: ${res.statusText}` });
-    }
-
-    const data = await res.json();
-    // Return a concise summary of results, not the whole raw dump
-    // The AI's prompt will guide it to pick relevant info.
-    const organicResults = data.organic?.map(item => ({
-      title: item.title,
-      link: item.link,
-      snippet: item.snippet
-    })) || [];
-
-    const answerBox = data.answerBox?.snippet || data.answerBox?.answer || data.answerBox?.title;
-    
-    // Prioritize an answer box if available, otherwise provide top organic results
-    if (answerBox) {
-        return JSON.stringify({ answer: answerBox, topResults: organicResults.slice(0, 3) });
-    }
-    return JSON.stringify({ topResults: organicResults.slice(0, 5) }); // Return top 5
-  } catch (e) {
-    logError(reqId, "Failed to fetch from SERP API", e.message);
-    return JSON.stringify({ error: `Failed to perform search: ${e.message}` });
-  }
-}
-
+// --- START OF MODIFIED CODE ---
 const tools = [
   {
     type: "function",
     function: {
       name: "request_dates",
+      // CHANGE: The description is now an explicit command for the AI.
       description: "Call this function to ask the user for their desired travel dates. Use this when dates are unknown but required for planning.",
       parameters: { type: "object", properties: {} },
     },
@@ -231,6 +183,7 @@ const tools = [
     type: "function",
     function: {
       name: "request_guests",
+      // CHANGE: This is the key fix. The new description is a clear, direct instruction, telling the AI exactly when and why to use this tool.
       description: "Call this function to ask the user how many people are traveling (e.g., adults, children). Use this when the number of guests is unknown and you need this information to create a plan.",
       parameters: { type: "object", properties: {} },
     },
@@ -238,58 +191,40 @@ const tools = [
   {
     type: "function",
     function: {
-      name: "search_web", // New: Web search tool
-      description: "Search the web for specific, factual information to enhance the travel plan. Use this for current weather, popular activities, specific restaurant suggestions, local transport options, or estimated prices for tours/activities. Always formulate concise, highly relevant queries.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "The specific search query (e.g., 'weather in Paris in July', 'best museums in London', 'cost of Tokyo Tower tickets', 'family friendly restaurants in Rome')."
-          },
-        },
-        required: ["query"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "create_plan",
-      description: "Call this function ONLY when the destination, dates, and number of guests are all known, AND you have gathered sufficient details via search_web to create a highly detailed, day-by-day travel plan with specific events (at least 3-5 per day), realistic times, specific suggestions (e.g., restaurant names, tour companies, exact attractions), and a comprehensive cost breakdown. Only call this when you have rich information.",
+      // CHANGE: Slightly rephrased for clarity, ensuring it's only called when all prerequisite information is available.
+      description: "Call this function ONLY when the destination, dates, and number of guests are all known. It will return a full, detailed, day-by-day travel plan with a cost breakdown.",
       parameters: {
         type: "object",
         properties: {
-          location: { type: "string", description: "The city or primary travel location." },
-          country: { type: "string", description: "The country of the travel location." },
-          dateRange: { type: "string", description: "The start and end dates of the trip (e.g., 'July 10-17, 2024')." },
-          description: { type: "string", description: "A summary of the trip, highlighting how it aligns with user preferences." },
-          image: { type: "string", description: "URL of a relevant image for the destination." },
-          price: { type: "number", description: "Estimated total cost of the trip." },
+          location: { type: "string" },
+          country: { type: "string" },
+          dateRange: { type: "string" },
+          description: { type: "string" },
+          image: { type: "string" },
+          price: { type: "number" },
           weather: {
             type: "object",
-            properties: { temp: { type: "number", description: "Average temperature in Celsius." }, icon: { type: "string", enum: ["sunny", "partly-sunny", "cloudy"], description: "Weather icon based on conditions." } },
-            required: ["temp", "icon"]
+            properties: { temp: { type: "number" }, icon: { type: "string" } },
           },
           itinerary: {
             type: "array",
             items: {
               type: "object",
               properties: {
-                date: { type: "string", description: "Date in YYYY-MM-DD format." },
-                day: { type: "string", description: "Day description, e.g., 'Dec 26'." },
+                date: { type: "string", description: "YYYY-MM-DD" },
+                day: { type: "string", description: "e.g., Dec 26" },
                 events: {
                   type: "array",
-                  description: "A detailed list of events for the day, including specific activities, meals, and timings.",
                   items: {
                     type: "object",
                     properties: {
-                      type: { type: "string", description: "Type of event (e.g., 'flight', 'activity', 'meal', 'relaxation')." },
-                      icon: { type: "string", description: "An icon representing the event type." },
-                      time: { type: "string", description: "Time of the event (e.g., '09:00 AM', 'Lunch', 'Evening')." },
-                      duration: { type: "string", description: "Estimated duration (e.g., '2 hours', 'Overnight')." },
-                      title: { type: "string", description: "Concise title for the event (e.g., 'Eiffel Tower Visit', 'Dinner at Le Jules Verne')." },
-                      details: { type: "string", description: "Detailed description of the event, including specifics, addresses, booking info, or recommendations found via search." },
+                      type: { type: "string" },
+                      icon: { type: "string" },
+                      time: { type: "string" },
+                      duration: { type: "string" },
+                      title: { type: "string" },
+                      details: { type: "string" },
                     },
                     required: ["type", "icon", "time", "duration", "title", "details"],
                   },
@@ -303,12 +238,15 @@ const tools = [
             items: {
               type: "object",
               properties: {
-                item: { type: "string", description: "Item name (e.g., 'Flight', 'Hotel', 'Eiffel Tower Ticket')." },
-                provider: { type: "string", description: "Service provider (e.g., 'Air France', 'The Ritz', 'Official Website')." },
-                details: { type: "string", description: "Specific details about the cost item (e.g., 'Round trip, economy class', '3 nights, city view room')." },
-                price: { type: "number", description: "Estimated price in USD." },
-                iconType: { type: "string", enum: ["image", "date"], description: "Type of icon for the cost item." },
-                  iconValue: { type: "string", description: "URL for an image icon OR 'Month Day' for a date icon (e.g., 'Dec 26')." },
+                item: { type: "string" },
+                provider: { type: "string" },
+                details: { type: "string" },
+                price: { type: "number" },
+                iconType: { type: "string", enum: ["image", "date"] },
+                iconValue: {
+                  type: "string",
+                  description: "A URL for the image OR 'Month Day' for date (e.g., 'Dec 26')",
+                },
               },
               required: ["item", "provider", "details", "price", "iconType", "iconValue"],
             },
@@ -328,6 +266,7 @@ const tools = [
     },
   },
 ];
+// --- END OF MODIFIED CODE ---
 
 
 const getSystemPrompt = (profile) => `You are a world-class, professional AI travel agent. Your goal is to create inspiring, comprehensive, and highly personalized travel plans.
@@ -335,15 +274,8 @@ const getSystemPrompt = (profile) => `You are a world-class, professional AI tra
 **CRITICAL RULES:**
 1.  **USE THE PROFILE:** Meticulously analyze the user profile below. Every part of the plan—activities, hotel style, flight class, budget—must reflect their stated preferences. In the plan's 'description' field, explicitly mention how you used their preferences (e.g., "An active solo trip focusing on museums, as requested.").
 2.  **HANDLE NEW REQUESTS:** After a plan is created (the user history will contain "[PLAN_SNAPSHOT]"), you MUST treat the next user message as a **brand new request**. Forget the previous destination and start the planning process over. If they say "now to China," you must start planning a trip to China.
-3.  **BE COMPREHENSIVE & DETAILED:** A real plan covers everything. Your generated itinerary must be highly detailed, spanning multiple days with at least 3-5 varied events per day. For each event, provide specific, realistic details: actual activity names, real restaurant suggestions, estimated times, durations, and helpful descriptions.
-4.  **UTILIZE SEARCH_WEB:** Before calling \`create_plan\`, you MUST use the \`search_web\` tool to gather concrete, up-to-date information for your plan. This includes:
-    *   Current or historical weather for the travel dates/location.
-    *   Popular attractions, tours, and activities matching the user's preferences.
-    *   Specific, well-reviewed local restaurants or dining experiences.
-    *   Estimated costs for flights, accommodation, specific activities, and transport.
-    *   Any other factual details needed to make the plan realistic and compelling.
-    When using \`search_web\`, create focused queries to get precise results. Do not just dump raw search results; synthesize the information to enrich the \`create_plan\` arguments.
-5.  **STRICT DATA FORMAT:** You must call a function to get information or to create a plan. Never respond with just text if a function call is appropriate. Adhere perfectly to the function's JSON schema.
+3.  **BE COMPREHENSIVE:** A real plan covers everything. Your generated itinerary must be detailed, spanning multiple days with at least 3-5 varied events per day (e.g., flights, transfers, meals at real local restaurants, tours, museum visits, relaxation time).
+4.  **STRICT DATA FORMAT:** You must call a function to get information or to create a plan. Never respond with just text if a function call is appropriate. Adhere perfectly to the function's JSON schema.
     -   \`weather.icon\`: Must be one of: "sunny", "partly-sunny", "cloudy".
     -   \`itinerary.date\`: MUST be in 'YYYY-MM-DD' format.
     -   \`itinerary.day\`: MUST be in 'Mon Day' format (e.g., 'Dec 26').
@@ -370,23 +302,22 @@ function deriveSlots(history = []) {
   return { destinationKnown: !!destination, destination, datesKnown, guestsKnown };
 }
 
-// REVISED: normalizeMessages to correctly preserve tool_calls and tool_call_id
 function normalizeMessages(messages = []) {
   const allowedRoles = new Set(["system", "user", "assistant", "tool"]);
   return messages
     .filter((m) => !m.hidden)
     .map((m) => {
+        // The new `tool` role has a different structure
+        if (m.role === 'tool') {
+            return {
+                role: 'tool',
+                tool_call_id: m.tool_call_id,
+                content: m.content
+            };
+        }
         const role = allowedRoles.has(m.role) ? m.role : 'user';
         const content = m.content ?? m.text ?? '';
-        
-        const normalizedMessage = { role, content: String(content) };
-
-        if (m.role === 'assistant' && m.tool_calls) {
-            normalizedMessage.tool_calls = m.tool_calls;
-        } else if (m.role === 'tool' && m.tool_call_id) {
-            normalizedMessage.tool_call_id = m.tool_call_id;
-        }
-        return normalizedMessage;
+        return { role, content: String(content) };
     });
 }
 
@@ -431,7 +362,6 @@ router.post("/travel", async (req, res) => {
     }
 
     const systemPrompt = getSystemPrompt(mem.profile);
-    // Ensure `convo` includes the full history in the correct format for the first call
     const convo = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
 
     try {
@@ -446,150 +376,46 @@ router.post("/travel", async (req, res) => {
       const assistantMessage = choice?.message;
 
       // Check for tool calls first
-      if (assistantMessage?.tool_calls && assistantMessage.tool_calls.length > 0) {
-        const toolOutputs = [];
-        const assistantToolCalls = assistantMessage.tool_calls; // Store all tool calls made by the assistant
+      if (assistantMessage?.tool_calls) {
+        const toolCall = assistantMessage.tool_calls[0];
+        const functionName = toolCall.function?.name;
+        logInfo(reqId, `AI called tool: ${functionName}`);
 
-        for (const toolCall of assistantToolCalls) { // Iterate through all tool calls
-          const functionName = toolCall.function?.name;
-          logInfo(reqId, `AI called tool: ${functionName} (ID: ${toolCall.id})`);
-
-          let args = {};
-          try {
-            args = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
-          } catch (e) {
-            logError(reqId, `Failed to parse AI arguments for ${functionName} (ID: ${toolCall.id}), using fallback.`, e);
-            // If argument parsing fails for one tool, we might not be able to proceed cleanly.
-            // For now, let's trigger a full fallback.
-            return res.json(await runFallbackFlow());
-          }
-
-          if (functionName === "create_plan") {
-            args.image = await pickPhoto(args.location, reqId);
-            if (args.weather && !["sunny", "partly-sunny", "cloudy"].includes(args.weather.icon)) {
-              args.weather.icon = "sunny"; // Default if not valid
-            }
-            // For create_plan, we directly return the signal and don't need a tool_output to the AI
-            // Ensure assistantMessage is correctly structured for the frontend
-            return res.json({ 
-                assistantMessage: {
-                    role: 'assistant',
-                    content: assistantMessage.content || '',
-                    tool_calls: assistantMessage.tool_calls // Include the tool calls in the message sent to frontend
-                },
-                signal: { type: "planReady", payload: args },
-                aiText: "Here is your personalized plan!" 
-            });
-          } else if (functionName === "request_dates") {
-            return res.json({ 
-                assistantMessage: {
-                    role: 'assistant',
-                    content: assistantMessage.content || '',
-                    tool_calls: assistantMessage.tool_calls
-                },
-                signal: { type: "dateNeeded" }, 
-                aiText: "When would you like to travel?" 
-            });
-          } else if (functionName === "request_guests") {
-            return res.json({ 
-                assistantMessage: {
-                    role: 'assistant',
-                    content: assistantMessage.content || '',
-                    tool_calls: assistantMessage.tool_calls
-                },
-                signal: { type: "guestsNeeded" }, 
-                aiText: "How many people are traveling?" 
-            });
-          } else if (functionName === "search_web") {
-            const searchResult = await performSearch(args.query, reqId);
-            toolOutputs.push({
-              tool_call_id: toolCall.id, // CRITICAL: Use the toolCall.id from the assistant message
-              output: searchResult,
-            });
-            // Note: assistantToolCalls already contains the original tool call, no need to push again
-          } else {
-              logError(reqId, `Unknown tool function called: ${functionName}`);
-              // Decide how to handle unknown tool calls, fallback or error message
-              return res.json(await runFallbackFlow());
-          }
+        let args = {};
+        try {
+          args = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
+        } catch (e) {
+          logError(reqId, "Failed to parse AI arguments, using fallback.", e);
+          return res.json(await runFallbackFlow());
         }
 
-        // If search_web was called and we have outputs, send them back to the model
-        if (toolOutputs.length > 0) {
-            // CRITICAL: Build messages for the *next* API call correctly
-            // It must contain:
-            // 1. System prompt
-            // 2. Previous user messages
-            // 3. The assistant's message with tool_calls (from the current turn)
-            // 4. The tool messages with their outputs (responses to the above tool_calls)
-            
-            const messagesForToolResponse = [
-                ...convo, // All previous messages up to the current assistant turn
-                {
-                    role: "assistant",
-                    content: assistantMessage.content || '', // Ensure content is not null
-                    tool_calls: assistantToolCalls // Include the actual tool calls made by the assistant
-                },
-                ...toolOutputs.map(output => ({
-                    role: "tool",
-                    tool_call_id: output.tool_call_id,
-                    content: output.output // Send the stringified JSON output
-                }))
-            ];
-
-            const responseToToolCall = await client.chat.completions.create({
-                model: "gpt-4o",
-                messages: messagesForToolResponse,
-                tools,
-                tool_choice: "auto",
-            });
-            
-            const nextAssistantMessage = responseToToolCall.choices?.[0]?.message;
-
-            // Update `messages` for the next potential recursion or final response
-            // This is crucial for maintaining conversation history for the frontend
-            const updatedMessages = [
-                ...messages, // Original history
-                { // Add the assistant's response that included the tool_calls
-                    role: 'assistant', 
-                    content: assistantMessage.content || '', 
-                    tool_calls: assistantMessage.tool_calls 
-                }, 
-                ...toolOutputs.map(output => ({ // Add the tool execution results
-                    role: 'tool', 
-                    tool_call_id: output.tool_call_id, 
-                    content: output.output 
-                }))
-            ];
-
-            if (nextAssistantMessage?.tool_calls && nextAssistantMessage.tool_calls.length > 0) {
-                // If the AI makes *another* tool call (e.g., create_plan after search)
-                logInfo(reqId, "AI made another tool call after search. Recursively processing.");
-                
-                // Add the new assistant message (which might contain another tool_call or final text)
-                updatedMessages.push({ 
-                    role: 'assistant', 
-                    tool_calls: nextAssistantMessage.tool_calls, 
-                    content: nextAssistantMessage.content || '' 
-                });
-
-                // Recursively call the route handler with the updated messages
-                // This simulates the turn-taking with the AI
-                req.body.messages = updatedMessages; 
-                return router.handle(req, res); // Re-invoke the router for next step
-            } else {
-                // If after search, the AI just responds with text or completes.
-                // Add the final assistant message to the history.
-                if (nextAssistantMessage?.content) {
-                     updatedMessages.push({ role: 'assistant', content: nextAssistantMessage.content });
-                }
-               
-                return res.json({ 
-                    aiText: nextAssistantMessage?.content || "I have processed the search results.",
-                    // This is where you might return a final plan if the nextAssistantMessage was create_plan
-                    // For now, assume a text response unless it explicitly calls create_plan
-                });
+        // We need to return the assistant's message so the frontend can add it to the history
+        // for the subsequent tool response message.
+        const responsePayload = {
+            assistantMessage: {
+                ...assistantMessage,
+                content: assistantMessage.content || '', // Ensure content is not null
             }
+        };
+
+        if (functionName === "create_plan") {
+          args.image = await pickPhoto(args.location, reqId);
+          if (args.weather && !["sunny", "partly-sunny", "cloudy"].includes(args.weather.icon)) {
+            args.weather.icon = "sunny";
+          }
+          responsePayload.signal = { type: "planReady", payload: args };
+          responsePayload.aiText = "Here is your personalized plan!";
+          return res.json(responsePayload);
+        }
+        if (functionName === "request_dates") {
+          responsePayload.signal = { type: "dateNeeded" };
+          responsePayload.aiText = "When would you like to travel?";
+          return res.json(responsePayload);
+        }
+        if (functionName === "request_guests") {
+          responsePayload.signal = { type: "guestsNeeded" };
+          responsePayload.aiText = "How many people are traveling?";
+          return res.json(responsePayload);
         }
       }
 
@@ -604,10 +430,6 @@ router.post("/travel", async (req, res) => {
 
     } catch (e) {
       logError(reqId, "OpenAI API call failed. Responding with fallback flow.", e);
-      // Log the specific error from OpenAI if available
-      if (e.response?.data) {
-        logError(reqId, "OpenAI API Error Details:", e.response.data);
-      }
       return res.json(await runFallbackFlow());
     }
   } catch (err) {
