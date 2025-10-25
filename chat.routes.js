@@ -23,9 +23,7 @@ const hasSerpApiKey = Boolean(process.env.SERPAPI_API_KEY); // Check for SerpAPI
 
 const client = hasOpenAIKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
-// --- START OF MODIFIED CODE ---
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
-// --- END OF MODIFIED CODE ---
 
 const newReqId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
@@ -402,18 +400,16 @@ function deriveSlots(history = []) {
 
 /** Normalize incoming messages to OpenAI's { role, content } format */
 function normalizeMessages(messages = []) {
-  const allowedRoles = new Set(["system", "user", "assistant", "tool"]); // Added 'tool' role
+  const allowedRoles = new Set(["system", "user", "assistant", "tool"]);
   return messages
     .filter((m) => !m.hidden)
     .map((m) => {
-      // Map tool_calls to 'assistant' role with tool_calls property
       if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
         return {
           role: 'assistant',
           tool_calls: m.tool_calls
         };
       }
-      // Map tool_response to 'tool' role with tool_call_id and content
       if (m.role === 'tool' && m.tool_call_id) {
         return {
           role: 'tool',
@@ -430,8 +426,6 @@ function normalizeMessages(messages = []) {
 
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
-  // Store tool outputs for the current turn
-  const toolOutputs = {}; 
   try {
     const { messages = [], userId = "anonymous" } = req.body || {};
     logInfo(reqId, `POST /chat/travel, user=${userId}, hasOpenAIKey=${hasOpenAIKey}, hasSerpApiKey=${hasSerpApiKey}, fetch=${FETCH_SOURCE}`);
@@ -471,14 +465,14 @@ router.post("/travel", async (req, res) => {
     }
 
     const systemPrompt = getSystemPrompt(mem.profile);
-    const convo = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
+    // Initial conversation context, including the system prompt
+    let currentConvo = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
 
     try {
-      let currentConvo = [...convo]; // Create a mutable copy for the loop
       const MAX_TOOL_CALL_ITERATIONS = 5; // Prevent infinite loops
       for (let i = 0; i < MAX_TOOL_CALL_ITERATIONS; i++) {
         const completion = await client.chat.completions.create({
-          model: "gpt-4o", // Using gpt-4o as it's excellent for tool use
+          model: "gpt-4o",
           messages: currentConvo,
           tools,
           tool_choice: "auto",
@@ -488,7 +482,7 @@ router.post("/travel", async (req, res) => {
         const message = choice?.message;
 
         // If the AI provides a text response, we are done
-        if (message?.content) {
+        if (message?.content && !message.tool_calls) { // Ensure no tool calls are present
           return res.json({ aiText: message.content });
         }
 
@@ -508,12 +502,25 @@ router.post("/travel", async (req, res) => {
             return res.json(await runFallbackFlow());
           }
 
-          // Handle simple UI signals immediately
+          // Execute the function (API calls, etc.)
+          const handler = functionHandlers[functionName];
+          if (!handler) {
+            throw new Error(`Unknown tool called: ${functionName}`);
+          }
+          const toolResult = await handler(args);
+
+          // ALWAYS add the tool response to the conversation history immediately
+          currentConvo.push({
+            tool_call_id: toolCall.id,
+            role: "tool",
+            content: JSON.stringify(toolResult),
+          });
+
+          // Now, handle immediate UI signals AFTER the tool result has been added to history
           if (functionName === "request_dates") {
             return res.json({
               aiText: message.content || "When would you like to travel?",
               signal: { type: "dateNeeded" },
-              // Include the tool call in assistantMessage for frontend to track if needed
               assistantMessage: { role: 'assistant', tool_calls: [{ id: toolCall.id, type: 'function', function: { name: 'request_dates', arguments: JSON.stringify(args) } }] }
             });
           }
@@ -521,25 +528,9 @@ router.post("/travel", async (req, res) => {
             return res.json({
               aiText: message.content || "How many people are traveling?",
               signal: { type: "guestsNeeded" },
-              // Include the tool call in assistantMessage for frontend to track if needed
               assistantMessage: { role: 'assistant', tool_calls: [{ id: toolCall.id, type: 'function', function: { name: 'request_guests', arguments: JSON.stringify(args) } }] }
             });
           }
-
-          // Execute the function (API calls, etc.)
-          const handler = functionHandlers[functionName];
-          if (!handler) {
-            throw new Error(`Unknown tool called: ${functionName}`);
-          }
-          const toolResult = await handler(args);
-          toolOutputs[functionName] = toolResult; // Store tool output
-
-          // Add tool response to conversation history
-          currentConvo.push({
-            tool_call_id: toolCall.id,
-            role: "tool",
-            content: JSON.stringify(toolResult),
-          });
 
           // If the tool was create_plan, we're done!
           if (functionName === "create_plan") {
@@ -554,8 +545,11 @@ router.post("/travel", async (req, res) => {
               signal: { type: "planReady", payload },
             });
           }
-          // If it's a search tool, loop again to let AI process results and decide next step (e.g., create_plan)
-          // The loop will continue, and the AI will see the tool output in the `currentConvo`
+          
+          // For other tools (like search_flights, search_hotels), the loop continues.
+          // The next iteration of `client.chat.completions.create` will see the tool's output
+          // in `currentConvo`, allowing the AI to use that information.
+
         } else {
           // No tool call and no content, this shouldn't happen but log it
           logInfo(reqId, "AI did not call a tool or return text. Using fallback.");
