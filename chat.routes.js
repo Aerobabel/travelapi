@@ -192,6 +192,7 @@ const functionHandlers = {
   request_dates: async () => ({}), // UI-only
   request_guests: async () => ({}), // UI-only
 
+  // FIXED: use getJson("google_flights", params)
   search_flights: async ({
     departure_airport,
     arrival_airport,
@@ -200,14 +201,15 @@ const functionHandlers = {
   }) => {
     if (!hasSerpApiKey) return { error: "Flight search is unavailable." };
     try {
-      const response = await getJson({
-        engine: "google_flights",
+      const response = await getJson("google_flights", {
         api_key: process.env.SERPAPI_API_KEY,
         departure_id: departure_airport,
         arrival_id: arrival_airport,
         outbound_date: departure_date,
         return_date: return_date,
         currency: "USD",
+        hl: "en",
+        gl: "us",
       });
 
       const bestFlight = response.best_flights?.[0];
@@ -225,21 +227,23 @@ const functionHandlers = {
         ],
       };
     } catch (e) {
-      logError("SERPAPI_FLIGHTS_ERROR", e.message);
+      logError("SERPAPI_FLIGHTS_ERROR", e?.message || e);
       return { error: "Could not retrieve flight information." };
     }
   },
 
+  // FIXED: use getJson("google_hotels", params)
   search_hotels: async ({ location, check_in_date, check_out_date }) => {
     if (!hasSerpApiKey) return { error: "Hotel search is unavailable." };
     try {
-      const response = await getJson({
-        engine: "google_hotels",
+      const response = await getJson("google_hotels", {
         api_key: process.env.SERPAPI_API_KEY,
         q: `hotels in ${location}`,
         check_in_date,
         check_out_date,
         currency: "USD",
+        hl: "en",
+        gl: "us",
       });
 
       const hotels =
@@ -251,7 +255,7 @@ const functionHandlers = {
         })) || [];
       return { hotels };
     } catch (e) {
-      logError("SERPAPI_HOTELS_ERROR", e.message);
+      logError("SERPAPI_HOTELS_ERROR", e?.message || e);
       return { error: "Could not retrieve hotel information." };
     }
   },
@@ -402,8 +406,6 @@ ${JSON.stringify(profile, null, 2)}
 
 /* ------------------- HISTORY NORMALIZER (OpenAI) --------------------- */
 function normalizeToOpenAI(messages = []) {
-  // Convert generic { role, content/text } into OpenAI chat messages
-  // We'll only include user & assistant textual turns; tool results will be appended during the loop
   const out = [];
   for (const m of messages) {
     if (m.hidden) continue;
@@ -413,7 +415,6 @@ function normalizeToOpenAI(messages = []) {
     } else if (m.role === "assistant" || m.role === "ai") {
       out.push({ role: "assistant", content: m.content || m.text || "" });
     }
-    // NOTE: 'tool' messages in your input history are not included; function calls will be new in this run
   }
   return out;
 }
@@ -438,7 +439,6 @@ router.post("/travel", async (req, res) => {
     const systemPrompt = getSystemPrompt(mem.profile);
     const chatHistory = normalizeToOpenAI(messages);
 
-    // Ensure we always start with a system message to steer the model
     const baseMessages = [{ role: "system", content: systemPrompt }, ...chatHistory];
 
     /* --------------------------- AGENT LOOP -------------------------- */
@@ -457,12 +457,11 @@ router.post("/travel", async (req, res) => {
       const msg = completion.choices?.[0]?.message;
       const toolCalls = msg?.tool_calls || [];
 
-      // If assistant wants to call tools
       if (toolCalls.length > 0) {
-        // Special-casing UI prompts first
+        // Immediate UI prompts
         for (const tc of toolCalls) {
-          const functionName = tc.function?.name;
-          if (functionName === "request_dates") {
+          const fn = tc.function?.name;
+          if (fn === "request_dates") {
             return res.json({
               aiText: "When would you like to travel?",
               signal: { type: "dateNeeded" },
@@ -478,7 +477,7 @@ router.post("/travel", async (req, res) => {
               },
             });
           }
-          if (functionName === "request_guests") {
+          if (fn === "request_guests") {
             return res.json({
               aiText: "How many people will be traveling?",
               signal: { type: "guestsNeeded" },
@@ -496,7 +495,7 @@ router.post("/travel", async (req, res) => {
           }
         }
 
-        // Execute tool calls and append their results
+        // Append assistant tool-calls
         loopMessages.push({
           role: "assistant",
           content: msg.content || "",
@@ -507,6 +506,7 @@ router.post("/travel", async (req, res) => {
           })),
         });
 
+        // Execute functions and append their results
         for (const tc of toolCalls) {
           const functionName = tc.function?.name;
           const rawArgs = tc.function?.arguments || "{}";
@@ -543,17 +543,15 @@ router.post("/travel", async (req, res) => {
           });
         }
 
-        // Continue the loop to let the model react to tool results
-        continue;
+        continue; // go to next loop turn so model can use tool results
       }
 
-      // No tool call → final assistant answer
+      // No tool call → final text
       const finalText = msg?.content?.trim();
       if (finalText) {
         return res.json({ aiText: finalText });
       }
 
-      // Safety net: if nothing useful returned
       return res.json({
         aiText:
           "I'm sorry, I couldn't process that right now. Could you try again with a bit more detail?",
