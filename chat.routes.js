@@ -22,7 +22,7 @@ const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY);
 const hasSerpApiKey = Boolean(process.env.SERPAPI_API_KEY);
 
 const genAI = hasGeminiKey ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
-const generativeModel = genAI ? genAI.getGenerativeModel({ model: "gemini-pro" }) : null;
+const generativeModel = genAI ? genAI.getGenerativeModel({ model: "gemini-1.0-pro" }) : null;
 
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
