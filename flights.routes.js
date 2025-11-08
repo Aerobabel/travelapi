@@ -8,7 +8,7 @@ const router = express.Router();
 const amadeus = new Amadeus({
   clientId: process.env.AMADEUS_CLIENT_ID,
   clientSecret: process.env.AMADEUS_CLIENT_SECRET,
-  hostname: process.env.AMADEUS_HOSTNAME || 'test', // 'test' | 'production'
+  hostname: process.env.AMADEUS_HOSTNAME || 'production', // 'test' | 'production'
 });
 
 /* ------------------------- helpers ------------------------- */
