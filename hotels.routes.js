@@ -10,7 +10,7 @@ const router = Router();
 const amadeus = new Amadeus({
   clientId: process.env.AMADEUS_CLIENT_ID,
   clientSecret: process.env.AMADEUS_CLIENT_SECRET,
-  // hostname: process.env.AMADEUS_HOSTNAME || 'test', // set 'production' in env for live
+  hostname: process.env.AMADEUS_HOSTNAME || 'test', // set 'production' in env for live
 });
 
 // ---------------------------
