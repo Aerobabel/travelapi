@@ -28,8 +28,9 @@ const getCode = (label) => {
 const normalizeOffer = (fo) => {
   const price = Number(fo?.price?.grandTotal || fo?.price?.total || 0);
   const it = fo?.itineraries?.[0];
-  const seg0 = it?.segments?.[0];
-  const segLast = it?.segments?.[it?.segments?.length - 1];
+  const segs = it?.segments || [];
+  const seg0 = segs[0];
+  const segLast = segs[segs.length - 1];
 
   const departISO = seg0?.departure?.at || '';
   const arriveISO = segLast?.arrival?.at || '';
@@ -39,7 +40,31 @@ const normalizeOffer = (fo) => {
   const carrier = seg0?.carrierCode || fo?.validatingAirlineCodes?.[0] || '';
   const airportFrom = seg0?.departure?.iataCode || '';
   const airportTo = segLast?.arrival?.iataCode || '';
-  const duration = (it?.duration || '').replace('PT', '').toLowerCase();
+  const isoDuration = it?.duration || '';
+  const duration = isoDuration.replace('PT', '').toLowerCase();
+
+  const parseIsoDurationToMinutes = (iso) => {
+    if (!iso || typeof iso !== 'string') return null;
+    const h = iso.match(/(\d+)H/);
+    const m = iso.match(/(\d+)M/);
+    const hours = h ? parseInt(h[1], 10) : 0;
+    const mins = m ? parseInt(m[1], 10) : 0;
+    return hours * 60 + mins;
+  };
+
+  const durationMinutes = parseIsoDurationToMinutes(isoDuration);
+
+  let maxLayoverMinutes = 0;
+  let hasOvernightLayover = false;
+  for (let i = 0; i < segs.length - 1; i++) {
+    const a = new Date(segs[i].arrival.at);
+    const d = new Date(segs[i + 1].departure.at);
+    const diffMin = (d - a) / 60000;
+    if (diffMin > maxLayoverMinutes) maxLayoverMinutes = diffMin;
+    if (a.getDate() !== d.getDate()) hasOvernightLayover = true;
+  }
+
+  const stops = Math.max(0, segs.length - 1);
 
   return {
     id: fo?.id || `${airportFrom}-${airportTo}-${depart}`,
@@ -50,9 +75,14 @@ const normalizeOffer = (fo) => {
     arrive,
     airportFrom,
     airportTo,
+    stops,
+    durationMinutes,
+    maxLayoverMinutes,
+    hasOvernightLayover,
     _raw: fo,
   };
 };
+
 
 /* ------------------------- routes ------------------------- */
 
