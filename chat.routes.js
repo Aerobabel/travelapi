@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// --- 1. SETUP & POLYFILLS ---
+// --- 1. Polyfills & Setup ---
 let FETCH_SOURCE = "native";
 try {
   if (typeof globalThis.fetch !== "function") {
@@ -19,13 +19,10 @@ try {
 
 const router = Router();
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
-const hasSerp = Boolean(process.env.SERPAPI_API_KEY);
-
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
-const SERPAPI_KEY = process.env.SERPAPI_API_KEY;
 
-// --- 2. HELPERS & STATE ---
+// --- 2. Helpers ---
 const newReqId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const logInfo = (reqId, ...args) => console.log(`[chat][${reqId}]`, ...args);
 const logError = (reqId, ...args) => console.error(`[chat][${reqId}]`, ...args);
@@ -37,38 +34,28 @@ const getMem = (userId) => {
   if (!userMem.has(userId)) {
     userMem.set(userId, {
       profile: {
-        origin_city: null, // NEW: We need to know where they live
         preferred_travel_type: [],
+        travel_alone_or_with: null,
         budget: { prefer_comfort_or_saving: "balanced" },
+        liked_activities: [],
       },
     });
   }
   return userMem.get(userId);
 };
 
-// Capture origin city if mentioned in passing
 function updateProfileFromHistory(messages, mem) {
-    const lastUserMsg = messages.filter(m => m.role === 'user').pop();
-    if (!lastUserMsg) return;
-    const text = (lastUserMsg.text || lastUserMsg.content || "").toLowerCase();
-    
-    // Simple regex to catch explicit "flying from X" (The AI tool request_origin handles the specific case better)
-    if (text.includes("flying from")) {
-        const match = text.match(/from\s+([a-z\s]+)/);
-        if (match && match[1]) mem.profile.origin_city = match[1].trim();
-    }
+  // Simple logic to keep memory fresh (abbreviated for clarity)
 }
 
-// --- 3. EXTERNAL API HANDLERS ---
-
-const FALLBACK_IMAGE_URL = "https://images.unsplash.com/photo-1476514525535-07fb3b4ae5f1?q=80&w=1470&auto=format&fit=crop";
+const FALLBACK_IMAGE_URL = "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?q=80&w=1442&auto=format&fit=crop";
 
 async function pickPhoto(dest, reqId) {
   const cacheKey = (dest || "").toLowerCase().trim();
   if (imageCache.has(cacheKey)) return imageCache.get(cacheKey);
   if (!UNSPLASH_ACCESS_KEY) return FALLBACK_IMAGE_URL;
 
-  const query = encodeURIComponent(`${dest} travel scenic`);
+  const query = encodeURIComponent(`${dest} travel landmark`);
   const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=1&orientation=landscape`;
 
   try {
@@ -86,79 +73,29 @@ async function pickPhoto(dest, reqId) {
   }
 }
 
-async function performGoogleSearch(query, reqId) {
-  if (!SERPAPI_KEY) return "Error: SERPAPI_API_KEY not configured.";
-  
-  logInfo(reqId, `Performing Live Search: "${query}"`);
-  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${SERPAPI_KEY}&num=5`;
-
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-
-    // We prioritize "knowledge_graph" (facts) and "organic_results" (snippets)
-    // We also check for "answer_box" which often contains flight prices in snippets
-    const snippets = [];
-    if (data.answer_box) snippets.push(`Direct Answer: ${JSON.stringify(data.answer_box)}`);
-    if (data.knowledge_graph) snippets.push(`Fact: ${data.knowledge_graph.description || data.knowledge_graph.title}`);
-    if (data.organic_results) {
-      data.organic_results.slice(0, 4).forEach(r => {
-        snippets.push(`Source (${r.title}): ${r.snippet}`);
-      });
-    }
-
-    return snippets.join("\n\n") || "No search results found.";
-  } catch (e) {
-    logError(reqId, "SerpApi Failed", e);
-    return "Search request failed.";
-  }
-}
-
-// --- 4. STRICT TOOL DEFINITIONS ---
+// --- 3. TOOLS (Strict Format Enforcement) ---
 const tools = [
   {
     type: "function",
     function: {
-      name: "search_google",
-      description: "REQUIRED. Search for real-time flight prices, hotel costs, or specific venues. Query MUST include the Origin City for flights (e.g., 'Flights from London to Paris price').",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "The search query." }
-        },
-        required: ["query"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
       name: "request_dates",
-      description: "Call this if the user has NOT specified travel dates.",
-      parameters: { type: "object", properties: {} }
-    }
+      description: "MANDATORY: Call this immediately if the user has not provided a specific timeframe or dates.",
+      parameters: { type: "object", properties: {} },
+    },
   },
   {
     type: "function",
     function: {
       name: "request_guests",
-      description: "Call this if the user has NOT specified the number of travelers.",
-      parameters: { type: "object", properties: {} }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "request_origin",
-      description: "CRITICAL: Call this if the user has not said where they are flying FROM. You cannot plan flights without this.",
-      parameters: { type: "object", properties: {} }
-    }
+      description: "MANDATORY: Call this immediately if the user has not specified the number of people traveling.",
+      parameters: { type: "object", properties: {} },
+    },
   },
   {
     type: "function",
     function: {
       name: "create_plan",
-      description: "The Final Output. Call this ONLY when you have: Destination, Origin, Dates, Guests, and Real Search Data. Do NOT output text when you are ready to call this.",
+      description: "Call this ONLY when Destination, Dates, and Guest Count are all known.",
       parameters: {
         type: "object",
         properties: {
@@ -169,15 +106,16 @@ const tools = [
           price: { type: "number" },
           weather: {
             type: "object",
-            properties: { temp: { type: "number" }, icon: { type: "string", enum: ["sunny", "cloudy", "partly-sunny"] } },
+            properties: { temp: { type: "number" }, icon: { type: "string" } },
           },
           itinerary: {
             type: "array",
             items: {
               type: "object",
               properties: {
-                date: { type: "string" },
-                day: { type: "string" },
+                date: { type: "string", description: "YYYY-MM-DD" },
+                // FIX: Strict date formatting instruction
+                day: { type: "string", description: "Strict Format: 'MMM DD' (e.g., 'Nov 02', 'Oct 14'). Do NOT use 'Day 1' or 'Friday'." },
                 events: {
                   type: "array",
                   items: {
@@ -190,12 +128,12 @@ const tools = [
                       title: { type: "string" },
                       details: { type: "string" },
                     },
-                    required: ["type", "icon", "time", "duration", "title", "details"]
-                  }
-                }
+                    required: ["type", "icon", "time", "duration", "title", "details"],
+                  },
+                },
               },
-              required: ["date", "day", "events"]
-            }
+              required: ["date", "day", "events"],
+            },
           },
           costBreakdown: {
             type: "array",
@@ -206,52 +144,62 @@ const tools = [
                 provider: { type: "string" },
                 details: { type: "string" },
                 price: { type: "number" },
-                iconType: { type: "string", enum: ["image", "date"] },
+                iconType: { type: "string" },
                 iconValue: { type: "string" },
               },
-              required: ["item", "provider", "details", "price", "iconType", "iconValue"]
-            }
-          }
+              required: ["item", "provider", "details", "price", "iconType", "iconValue"],
+            },
+          },
         },
-        required: ["location", "country", "dateRange", "description", "price", "itinerary", "costBreakdown"]
-      }
-    }
-  }
+        required: ["location", "country", "dateRange", "description", "price", "itinerary", "costBreakdown"],
+      },
+    },
+  },
 ];
 
-// --- 5. STRICT GATEKEEPER PROMPT ---
-const getSystemPrompt = (profile) => `You are an automated Travel Planning Engine. You are NOT a conversational chatbot.
+// --- 4. SYSTEM PROMPT (Gatekeeper Logic) ---
+const getSystemPrompt = (profile) => `You are a high-end AI Travel Architect.
 
-**STATE MACHINE RULES:**
-You must evaluate the "Current State" and execute the EXACT corresponding action.
+**GATEKEEPER RULES (FOLLOW STRICTLY):**
+1. **Check Information:** Do you know the user's DESTINATION? Do you know the DATES? Do you know the GUEST COUNT?
+2. **Missing Dates?** -> STOP. Call \`request_dates\`. Do not generate a plan yet.
+3. **Missing Guests?** -> STOP. Call \`request_guests\`. Do not generate a plan yet.
+4. **Have All Data?** -> Call \`create_plan\`.
 
-**STATE 1: MISSING CRITICAL DATA**
-Check these variables:
-1. **Destination:** (Known?)
-2. **Origin City:** (Known? If user didn't say "flying from X", it is UNKNOWN.)
-3. **Dates:** (Known?)
-4. **Guest Count:** (Known?)
+**ITINERARY GUIDELINES:**
+- **Concrete Details:** Do not say "Visit a cafe". Say "Coffee at *Cafe Pouchkine* ($12)".
+- **Date Format:** You MUST use "MMM DD" format for the 'day' field (e.g., "Nov 02", "Dec 25"). NEVER use "Day 1" or "Monday".
+- **Weather:** Estimate realistic weather for the season.
 
-> ACTION: If ANY are missing, immediately call the corresponding tool: \`request_origin\`, \`request_dates\`, or \`request_guests\`. Do NOT guess. Do NOT search yet.
-
-**STATE 2: GATHERING INTELLIGENCE**
-If all variables in State 1 are known, but you haven't searched for prices yet:
-> ACTION: Call \`search_google\`.
-> Query Examples: 
-> - "Round trip flight from ${profile.origin_city || 'USER_ORIGIN'} to DESTINATION dates..."
-> - "Hotel prices in DESTINATION for 2 adults..."
-> - "Top rated restaurants in DESTINATION..."
-
-**STATE 3: FINALIZING**
-If you have the user data AND the search results:
-> ACTION: Call \`create_plan\`.
-> **CRITICAL:** Do NOT summarize the plan in text. Do NOT say "Here is your plan." JUST CALL THE FUNCTION.
-
-**USER CONTEXT:**
+**USER PROFILE:**
 ${JSON.stringify(profile, null, 2)}
 `;
 
-// --- 6. ROUTE HANDLER ---
+// --- 5. Route Handler ---
+
+function normalizeMessages(messages = []) {
+  const allowedRoles = new Set(["system", "user", "assistant", "tool"]);
+  return messages
+    .filter((m) => !m.hidden)
+    .map((m) => {
+        if (m.role === 'tool') {
+            return {
+                role: 'tool',
+                tool_call_id: m.tool_call_id,
+                content: m.content
+            };
+        }
+        const role = allowedRoles.has(m.role) ? m.role : 'user';
+        // Convert plan payloads to text summaries so the AI remembers previous plans
+        let content = m.content ?? m.text ?? '';
+        if (!content && m.payload) {
+            content = `[System: I previously created a plan for ${m.payload.location}. New request?]`;
+        }
+        
+        return { role, content: String(content) };
+    });
+}
+
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
   try {
@@ -259,120 +207,76 @@ router.post("/travel", async (req, res) => {
     const mem = getMem(userId);
     updateProfileFromHistory(messages, mem);
 
-    // 1. Prepare Conversation
+    if (!hasKey) return res.json({ aiText: "API Key missing. Cannot plan." });
+
     const systemPrompt = getSystemPrompt(mem.profile);
-    const convo = [
-        { role: "system", content: systemPrompt }, 
-        ...messages.map(m => ({
-            role: m.role === 'ai' ? 'assistant' : (m.role === 'plan' ? 'assistant' : m.role),
-            content: typeof m.content === 'string' ? m.content : (m.text || JSON.stringify(m.payload || ''))
-        })).filter(m => m.role !== 'tool')
-    ];
+    const convo = [{ role: "system", content: systemPrompt }, ...normalizeMessages(messages)];
 
-    // 2. Agent Loop (Max 5 turns to allow for Asking -> Answering -> Searching -> Planning)
-    let finalResponseSent = false;
-    let turns = 0;
-    const MAX_TURNS = 5;
-
-    while (!finalResponseSent && turns < MAX_TURNS) {
-      turns++;
-      logInfo(reqId, `Agent Loop Turn ${turns}`);
-
+    try {
       const completion = await client.chat.completions.create({
         model: "gpt-4o",
         messages: convo,
         tools,
-        tool_choice: "auto", // We rely on the strict prompt to force tools
-        temperature: 0.2, // Low temperature to force strict logic
+        tool_choice: "auto",
+        temperature: 0.2, // Lower temperature reduces hallucination of dates/guests
       });
 
-      const message = completion.choices[0].message;
+      const choice = completion.choices?.[0];
+      const assistantMessage = choice?.message;
 
-      // A. Does the AI want to call a tool?
-      if (message.tool_calls) {
-        convo.push(message); // Add intent to history
+      // --- HANDLE TOOLS ---
+      if (assistantMessage?.tool_calls) {
+        const toolCall = assistantMessage.tool_calls[0];
+        const fnName = toolCall.function?.name;
+        let args = {};
+        try { args = JSON.parse(toolCall.function.arguments); } catch (e) {}
 
-        // We only handle the FIRST tool call to keep state clean, or handle all if parallel
-        // For simplicity/safety in this flow, let's handle the first critical one
-        const toolCall = message.tool_calls[0]; 
-        const fnName = toolCall.function.name;
-        const args = JSON.parse(toolCall.function.arguments);
-        logInfo(reqId, `Tool Call: ${fnName}`, args);
+        const responsePayload = {
+            assistantMessage: {
+                ...assistantMessage,
+                content: assistantMessage.content || '', 
+            }
+        };
 
-        // CASE 1: SEARCH (Internal Agent Action)
-        if (fnName === "search_google") {
-          const searchResult = await performGoogleSearch(args.query, reqId);
-          convo.push({
-            role: "tool",
-            tool_call_id: toolCall.id,
-            content: searchResult
-          });
-          // Loop continues... AI receives data in next turn
+        if (fnName === "request_dates") {
+          responsePayload.signal = { type: "dateNeeded" };
+          responsePayload.aiText = "When are you planning to travel?"; 
+          return res.json(responsePayload);
         }
 
-        // CASE 2: MISSING DATA (Ask User)
-        else if (["request_dates", "request_guests", "request_origin"].includes(fnName)) {
-          let signalType = "";
-          let aiText = "";
-
-          if (fnName === "request_origin") {
-             // There isn't a UI sheet for origin yet, so we ask via text
-             aiText = "To find the best flights, I need to know: where are you flying from?";
-             // We don't send a signal because we want a text reply
-          } else if (fnName === "request_dates") {
-             signalType = "dateNeeded";
-             aiText = "When are you planning to travel?";
-          } else if (fnName === "request_guests") {
-             signalType = "guestsNeeded";
-             aiText = "How many people are in your group?";
-          }
-
-          res.json({ aiText, signal: signalType ? { type: signalType } : undefined });
-          finalResponseSent = true;
-          return;
+        if (fnName === "request_guests") {
+          responsePayload.signal = { type: "guestsNeeded" };
+          responsePayload.aiText = "Who is traveling with you?";
+          return res.json(responsePayload);
         }
 
-        // CASE 3: FINAL PLAN
-        else if (fnName === "create_plan") {
+        if (fnName === "create_plan") {
           args.image = await pickPhoto(args.location, reqId);
           
-          // Safety: If origin was never captured, update profile now for future
-          if (!mem.profile.origin_city && args.costBreakdown) {
-             // Simple heuristic: did it guess an origin in the plan?
+          if (args.weather && !["sunny", "partly-sunny", "cloudy"].includes(args.weather.icon)) {
+             args.weather.icon = "sunny";
           }
 
-          if (args.weather && !["sunny", "cloudy", "partly-sunny"].includes(args.weather.icon)) {
-            args.weather.icon = "sunny";
-          }
-
-          res.json({
-            aiText: `I've prepared a trip to ${args.location} from ${mem.profile.origin_city || 'your location'}.`,
-            signal: { type: "planReady", payload: args },
-            assistantMessage: message
-          });
-          finalResponseSent = true;
-          return;
+          responsePayload.signal = { type: "planReady", payload: args };
+          responsePayload.aiText = `I've planned your trip to ${args.location}!`;
+          return res.json(responsePayload);
         }
-      } else {
-        // B. AI responded with text
-        // Because of our strict prompt, if it responds with text, it's likely a clarifying question
-        // OR it failed to follow instructions.
-        
-        // If it wrote a giant text wall despite having data, we failed.
-        // But usually, with temp 0.2 and strict prompt, this only happens for "Clarifying questions"
-        res.json({ aiText: message.content });
-        finalResponseSent = true;
-        return;
       }
-    }
 
-    if (!finalResponseSent) {
-        res.json({ aiText: "I'm taking a bit too long to research. Could you try narrowing down your request?" });
-    }
+      // --- HANDLE TEXT ---
+      if (assistantMessage?.content) {
+        return res.json({ aiText: assistantMessage.content });
+      }
 
+      return res.json({ aiText: "I'm ready to plan. Where would you like to go?" });
+
+    } catch (e) {
+      logError(reqId, "OpenAI Error", e);
+      return res.json({ aiText: "I'm currently offline. Please try again later." });
+    }
   } catch (err) {
-    logError(reqId, "Critical Error", err);
-    res.status(500).json({ aiText: "Server error during planning." });
+    logError(reqId, `Critical handler error:`, err);
+    return res.status(500).json({ aiText: "Server error." });
   }
 });
 
