@@ -63,7 +63,6 @@ async function pickPhoto(dest, reqId) {
   if (imageCache.has(cacheKey)) return imageCache.get(cacheKey);
   if (!UNSPLASH_ACCESS_KEY) return FALLBACK_IMAGE_URL;
 
-  // Simple, reliable query
   const query = encodeURIComponent(`${dest} travel landmark`);
   const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=1&orientation=landscape`;
 
@@ -92,7 +91,8 @@ async function performGoogleSearch(query, reqId) {
         const data = await res.json();
         const snippets = [];
         
-        if (data.answer_box) snippets.push(`Answer: ${JSON.stringify(data.answer_box)}`);
+        // Prioritize flight/price boxes
+        if (data.answer_box) snippets.push(`Price Box: ${JSON.stringify(data.answer_box)}`);
         if (data.organic_results) {
             data.organic_results.slice(0, 3).forEach(r => snippets.push(`- ${r.title}: ${r.snippet}`));
         }
@@ -112,7 +112,7 @@ const tools = [
     type: "function",
     function: {
       name: "request_dates",
-      description: "Call if travel dates are missing from the conversation.",
+      description: "MANDATORY: Call this immediately if the user has NOT specified when they are traveling. Do NOT ask via text.",
       parameters: { type: "object", properties: {} }
     }
   },
@@ -120,7 +120,7 @@ const tools = [
     type: "function",
     function: {
       name: "request_guests",
-      description: "Call if the exact number of travelers is unknown.",
+      description: "MANDATORY: Call this immediately if the user has NOT specified the guest count. Do NOT ask via text.",
       parameters: { type: "object", properties: {} }
     }
   },
@@ -160,8 +160,9 @@ const tools = [
             items: {
               type: "object",
               properties: {
-                date: { type: "string" },
-                day: { type: "string" }, // e.g. "Nov 02"
+                date: { type: "string", description: "YYYY-MM-DD" },
+                // STRICT DATE FORMATTING INSTRUCTION
+                day: { type: "string", description: "STRICT FORMAT: 'MMM DD' (e.g., 'Nov 20', 'Oct 05'). FORBIDDEN: 'Friday', 'Day 1', 'Saturday'." },
                 events: {
                   type: "array",
                   items: {
@@ -203,25 +204,25 @@ const tools = [
   }
 ];
 
-// --- 5. SYSTEM PROMPT (Strict Phased Logic) ---
-const getSystemPrompt = (profile) => `You are an advanced Travel Agent.
+// --- 5. SYSTEM PROMPT ---
+const getSystemPrompt = (profile) => `You are a strict, logic-driven Travel Agent.
 
-**PHASE 1: LOGISTICS CHECK (Highest Priority)**
-Before searching or planning, you MUST confirm:
-1. **Dates:** If unknown, call \`request_dates\`.
-2. **Guests:** If unknown, call \`request_guests\`. (Do NOT assume 1 person).
-3. **Origin:** If unknown (and needed for flight search), ask in text.
+**PHASE 1: GATHER INFO (NO CHATTING)**
+- Check: Do I know the Dates? Do I know the Guest Count?
+- **MISSING DATES?** -> Call \`request_dates\` immediately. STOP. Do not write text.
+- **MISSING GUESTS?** -> Call \`request_guests\` immediately. STOP. Do not write text.
 
-**PHASE 2: RESEARCH**
-Once Phase 1 is complete, call \`search_google\` to find real prices for flights and hotels.
+**PHASE 2: RESEARCH (SILENT)**
+- If you have destination, dates, and guests, call \`search_google\`.
+- Search for: "Flights [Origin] to [Dest] [Dates]" and "Hotels in [Dest] [Dates] prices".
 
-**PHASE 3: PLANNING**
-Once research is done, call \`create_plan\`.
-- **Total Price:** Must sum up Flights + Hotels + Activities.
-- **Dates:** Format as "MMM DD" (e.g. Nov 12).
+**PHASE 3: PLAN (CONCRETE)**
+- **CRITICAL:** After receiving search results, do NOT summarize them in text. IMMEDIATELY call \`create_plan\`.
+- **Date Format:** You MUST use "MMM DD" format (e.g. "Nov 20"). Never use Day Names.
+- **Total Cost:** Sum of Flights + Hotels + Activities.
 
 **Context:**
-Origin: ${profile.origin_city || "Unknown"}
+Origin: ${profile.origin_city || "Unknown (Assume User's Current Location for now)"}
 `;
 
 // --- 6. ROUTE HANDLER ---
@@ -229,7 +230,6 @@ function normalizeMessages(messages = []) {
   return messages.filter(m => !m.hidden).map(m => {
       if (m.role === 'tool') return { role: 'tool', tool_call_id: m.tool_call_id, content: m.content };
       
-      // Collapse large plan payloads to save tokens/confusion
       let content = m.content ?? m.text ?? '';
       if (m.role === 'plan' || (m.role === 'assistant' && m.payload)) content = "[Previous Plan Created]";
       
@@ -246,22 +246,20 @@ router.post("/travel", async (req, res) => {
 
     if (!hasKey) return res.json({ aiText: "Service Unavailable" });
 
-    // Recursive Agent Loop
-    // We allow up to 3 turns in one request (e.g. Search -> Result -> Plan)
+    // Recursive Agent Loop (Max 3 turns)
     const runConversation = async (history, depth = 0) => {
-        if (depth > 3) return { aiText: "I'm processing your request. Please wait a moment." };
+        if (depth > 3) return { aiText: "I'm working on it..." };
 
         const completion = await client.chat.completions.create({
             model: "gpt-4o",
             messages: history,
             tools,
             tool_choice: "auto", 
-            temperature: 0.2, // Low temp to ensure logic sequence
+            temperature: 0.1, // Very strict logic
         });
 
         const msg = completion.choices[0].message;
 
-        // A. TOOL CALLS
         if (msg.tool_calls) {
             const tool = msg.tool_calls[0];
             const name = tool.function.name;
@@ -269,15 +267,15 @@ router.post("/travel", async (req, res) => {
 
             logInfo(reqId, `[Tool] ${name}`, args);
 
-            // 1. SEARCH -> Recurse
+            // 1. SEARCH -> Recurse immediately (Don't talk to user yet)
             if (name === "search_google") {
                 const result = await performGoogleSearch(args.query, reqId);
                 const newHistory = [...history, msg, { role: "tool", tool_call_id: tool.id, content: result }];
+                // Recurse: The AI sees the result and will likely call create_plan next
                 return runConversation(newHistory, depth + 1);
             }
 
-            // 2. LOGISTICS -> Return to Frontend
-            // Note: We return the tool call as 'assistantMessage' so frontend history stays in sync
+            // 2. UI SIGNALS -> Return to Frontend
             if (name === "request_dates") {
                 return { 
                     aiText: "When are you planning to travel?", 
@@ -295,19 +293,12 @@ router.post("/travel", async (req, res) => {
 
             // 3. PLAN -> Sanitize & Return
             if (name === "create_plan") {
-                // [SAFETY 1] Fetch Image
                 args.image = await pickPhoto(args.location, reqId);
-                
-                // [SAFETY 2] Ensure Weather
-                if (!args.weather || !args.weather.icon) {
-                    args.weather = { temp: 25, icon: "sunny" };
-                }
-
-                // [SAFETY 3] Ensure Itinerary Array
+                if (!args.weather || !args.weather.icon) args.weather = { temp: 25, icon: "sunny" };
                 if (!Array.isArray(args.itinerary)) args.itinerary = [];
 
                 return { 
-                    aiText: `I've planned a trip to ${args.location}. Total estimated cost: $${args.price}.`, 
+                    aiText: `I've planned a trip to ${args.location}. Estimated cost: $${args.price}.`, 
                     signal: { type: "planReady", payload: args },
                     assistantMessage: msg 
                 };
@@ -315,6 +306,8 @@ router.post("/travel", async (req, res) => {
         }
 
         // B. TEXT RESPONSE
+        // If the AI generates text, we check if it's "stalling" or asking a legit question
+        // With the strict prompt, this should only happen for clarifying questions (e.g. "What origin?")
         return { aiText: msg.content };
     };
 
