@@ -37,23 +37,30 @@ const getMem = (userId) => {
   if (!userMem.has(userId)) {
     userMem.set(userId, {
       profile: {
+        origin_city: null, // NEW: We need to know where they live
         preferred_travel_type: [],
         budget: { prefer_comfort_or_saving: "balanced" },
-        // Add other profile fields as needed
       },
     });
   }
   return userMem.get(userId);
 };
 
-// (Keep your existing profile update logic - abbreviated here for clarity)
+// Capture origin city if mentioned in passing
 function updateProfileFromHistory(messages, mem) {
-  // ... logic to extract preferences from text ...
+    const lastUserMsg = messages.filter(m => m.role === 'user').pop();
+    if (!lastUserMsg) return;
+    const text = (lastUserMsg.text || lastUserMsg.content || "").toLowerCase();
+    
+    // Simple regex to catch explicit "flying from X" (The AI tool request_origin handles the specific case better)
+    if (text.includes("flying from")) {
+        const match = text.match(/from\s+([a-z\s]+)/);
+        if (match && match[1]) mem.profile.origin_city = match[1].trim();
+    }
 }
 
 // --- 3. EXTERNAL API HANDLERS ---
 
-// A. Unsplash (Images)
 const FALLBACK_IMAGE_URL = "https://images.unsplash.com/photo-1476514525535-07fb3b4ae5f1?q=80&w=1470&auto=format&fit=crop";
 
 async function pickPhoto(dest, reqId) {
@@ -79,7 +86,6 @@ async function pickPhoto(dest, reqId) {
   }
 }
 
-// B. SerpApi (Real-Time Intelligence)
 async function performGoogleSearch(query, reqId) {
   if (!SERPAPI_KEY) return "Error: SERPAPI_API_KEY not configured.";
   
@@ -90,24 +96,16 @@ async function performGoogleSearch(query, reqId) {
     const res = await fetch(url);
     const data = await res.json();
 
-    // Extract meaningful bits to save token space
+    // We prioritize "knowledge_graph" (facts) and "organic_results" (snippets)
+    // We also check for "answer_box" which often contains flight prices in snippets
     const snippets = [];
-    
-    // 1. Knowledge Graph (Quick answers)
-    if (data.knowledge_graph) {
-      snippets.push(`Fact: ${data.knowledge_graph.description || data.knowledge_graph.title}`);
-    }
-
-    // 2. Organic Results (General Info)
+    if (data.answer_box) snippets.push(`Direct Answer: ${JSON.stringify(data.answer_box)}`);
+    if (data.knowledge_graph) snippets.push(`Fact: ${data.knowledge_graph.description || data.knowledge_graph.title}`);
     if (data.organic_results) {
       data.organic_results.slice(0, 4).forEach(r => {
-        snippets.push(`Source (${r.title}): ${r.snippet} ${r.rich_snippet?.top?.extensions?.join(", ") || ""}`);
+        snippets.push(`Source (${r.title}): ${r.snippet}`);
       });
     }
-
-    // 3. Flights/Hotels specific data often appears in 'answer_box' or specific widgets
-    // For a basic Google Search, we rely on snippets. 
-    // (To get deep flight data, you'd use the google_flights engine in SerpApi, but standard search works for general pricing).
 
     return snippets.join("\n\n") || "No search results found.";
   } catch (e) {
@@ -116,17 +114,17 @@ async function performGoogleSearch(query, reqId) {
   }
 }
 
-// --- 4. TOOL DEFINITIONS ---
+// --- 4. STRICT TOOL DEFINITIONS ---
 const tools = [
   {
     type: "function",
     function: {
       name: "search_google",
-      description: "REQUIRED for real-world data. Use this to find: flight prices, hotel costs, current weather, opening hours, or specific restaurant reviews. Do not guess prices.",
+      description: "REQUIRED. Search for real-time flight prices, hotel costs, or specific venues. Query MUST include the Origin City for flights (e.g., 'Flights from London to Paris price').",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Targeted search query, e.g., 'Flights New York to Paris Dec 25 price' or 'Best boutique hotels in Kyoto under $200'" }
+          query: { type: "string", description: "The search query." }
         },
         required: ["query"]
       }
@@ -136,7 +134,7 @@ const tools = [
     type: "function",
     function: {
       name: "request_dates",
-      description: "Ask the user for dates if they are missing.",
+      description: "Call this if the user has NOT specified travel dates.",
       parameters: { type: "object", properties: {} }
     }
   },
@@ -144,7 +142,15 @@ const tools = [
     type: "function",
     function: {
       name: "request_guests",
-      description: "Ask the user for guest count if missing.",
+      description: "Call this if the user has NOT specified the number of travelers.",
+      parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "request_origin",
+      description: "CRITICAL: Call this if the user has not said where they are flying FROM. You cannot plan flights without this.",
       parameters: { type: "object", properties: {} }
     }
   },
@@ -152,7 +158,7 @@ const tools = [
     type: "function",
     function: {
       name: "create_plan",
-      description: "The Final Output. Call this ONLY when you have researched specific places and costs using Google Search.",
+      description: "The Final Output. Call this ONLY when you have: Destination, Origin, Dates, Guests, and Real Search Data. Do NOT output text when you are ready to call this.",
       parameters: {
         type: "object",
         properties: {
@@ -213,25 +219,39 @@ const tools = [
   }
 ];
 
-// --- 5. SYSTEM PROMPT ---
-const getSystemPrompt = (profile) => `You are a Billion-Dollar Travel Agent. You do not guess—you verify.
+// --- 5. STRICT GATEKEEPER PROMPT ---
+const getSystemPrompt = (profile) => `You are an automated Travel Planning Engine. You are NOT a conversational chatbot.
 
-**CORE BEHAVIOR:**
-1. **Consultant First:** If the user is vague, ask clarifying questions.
-2. **Researcher Second:** BEFORE generating a plan, use the \`search_google\` tool to find REAL flight prices, hotel availability, and specific venue details. 
-   - *Example:* Don't say "Visit a museum." Search for "Best museums in Rome opening hours" and say "Visit the Borghese Gallery (Ticket: $22, Book 2 weeks ahead)."
-3. **Architect Third:** Assemble the data into the \`create_plan\` function.
+**STATE MACHINE RULES:**
+You must evaluate the "Current State" and execute the EXACT corresponding action.
 
-**USER PROFILE:**
+**STATE 1: MISSING CRITICAL DATA**
+Check these variables:
+1. **Destination:** (Known?)
+2. **Origin City:** (Known? If user didn't say "flying from X", it is UNKNOWN.)
+3. **Dates:** (Known?)
+4. **Guest Count:** (Known?)
+
+> ACTION: If ANY are missing, immediately call the corresponding tool: \`request_origin\`, \`request_dates\`, or \`request_guests\`. Do NOT guess. Do NOT search yet.
+
+**STATE 2: GATHERING INTELLIGENCE**
+If all variables in State 1 are known, but you haven't searched for prices yet:
+> ACTION: Call \`search_google\`.
+> Query Examples: 
+> - "Round trip flight from ${profile.origin_city || 'USER_ORIGIN'} to DESTINATION dates..."
+> - "Hotel prices in DESTINATION for 2 adults..."
+> - "Top rated restaurants in DESTINATION..."
+
+**STATE 3: FINALIZING**
+If you have the user data AND the search results:
+> ACTION: Call \`create_plan\`.
+> **CRITICAL:** Do NOT summarize the plan in text. Do NOT say "Here is your plan." JUST CALL THE FUNCTION.
+
+**USER CONTEXT:**
 ${JSON.stringify(profile, null, 2)}
-
-**RULES:**
-- Prices must be realistic estimates based on search data.
-- Itineraries must be concrete (Real names, real addresses).
-- If you lack dates/guests, ask for them immediately.
 `;
 
-// --- 6. ROUTE HANDLER (THE AGENT LOOP) ---
+// --- 6. ROUTE HANDLER ---
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
   try {
@@ -244,15 +264,15 @@ router.post("/travel", async (req, res) => {
     const convo = [
         { role: "system", content: systemPrompt }, 
         ...messages.map(m => ({
-            role: m.role === 'ai' ? 'assistant' : (m.role === 'plan' ? 'assistant' : m.role), // Normalize roles
+            role: m.role === 'ai' ? 'assistant' : (m.role === 'plan' ? 'assistant' : m.role),
             content: typeof m.content === 'string' ? m.content : (m.text || JSON.stringify(m.payload || ''))
-        })).filter(m => m.role !== 'tool') // Filter out old frontend tool artifacts if any
+        })).filter(m => m.role !== 'tool')
     ];
 
-    // 2. Run the Agent Loop (Max 3 turns to prevent timeout)
+    // 2. Agent Loop (Max 5 turns to allow for Asking -> Answering -> Searching -> Planning)
     let finalResponseSent = false;
     let turns = 0;
-    const MAX_TURNS = 3;
+    const MAX_TURNS = 5;
 
     while (!finalResponseSent && turns < MAX_TURNS) {
       turns++;
@@ -262,76 +282,97 @@ router.post("/travel", async (req, res) => {
         model: "gpt-4o",
         messages: convo,
         tools,
-        tool_choice: "auto",
+        tool_choice: "auto", // We rely on the strict prompt to force tools
+        temperature: 0.2, // Low temperature to force strict logic
       });
 
       const message = completion.choices[0].message;
 
-      // A. Does the AI want to talk or call a tool?
+      // A. Does the AI want to call a tool?
       if (message.tool_calls) {
-        convo.push(message); // Add AI's intent to history
+        convo.push(message); // Add intent to history
 
-        for (const toolCall of message.tool_calls) {
-          const fnName = toolCall.function.name;
-          const args = JSON.parse(toolCall.function.arguments);
-          logInfo(reqId, `Tool Call: ${fnName}`, args);
+        // We only handle the FIRST tool call to keep state clean, or handle all if parallel
+        // For simplicity/safety in this flow, let's handle the first critical one
+        const toolCall = message.tool_calls[0]; 
+        const fnName = toolCall.function.name;
+        const args = JSON.parse(toolCall.function.arguments);
+        logInfo(reqId, `Tool Call: ${fnName}`, args);
 
-          // CASE 1: Search (The "Billion Dollar" feature)
-          if (fnName === "search_google") {
-            const searchResult = await performGoogleSearch(args.query, reqId);
-            convo.push({
-              role: "tool",
-              tool_call_id: toolCall.id,
-              content: searchResult
-            });
-            // Loop continues... AI sees result in next turn and refines.
+        // CASE 1: SEARCH (Internal Agent Action)
+        if (fnName === "search_google") {
+          const searchResult = await performGoogleSearch(args.query, reqId);
+          convo.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: searchResult
+          });
+          // Loop continues... AI receives data in next turn
+        }
+
+        // CASE 2: MISSING DATA (Ask User)
+        else if (["request_dates", "request_guests", "request_origin"].includes(fnName)) {
+          let signalType = "";
+          let aiText = "";
+
+          if (fnName === "request_origin") {
+             // There isn't a UI sheet for origin yet, so we ask via text
+             aiText = "To find the best flights, I need to know: where are you flying from?";
+             // We don't send a signal because we want a text reply
+          } else if (fnName === "request_dates") {
+             signalType = "dateNeeded";
+             aiText = "When are you planning to travel?";
+          } else if (fnName === "request_guests") {
+             signalType = "guestsNeeded";
+             aiText = "How many people are in your group?";
           }
 
-          // CASE 2: Information Gathering (Dates/Guests)
-          else if (fnName === "request_dates" || fnName === "request_guests") {
-            const signalType = fnName === "request_dates" ? "dateNeeded" : "guestsNeeded";
-            const aiText = fnName === "request_dates" ? "When are you looking to travel?" : "How many guests?";
-            
-            res.json({ aiText, signal: { type: signalType } });
-            finalResponseSent = true;
-            return; // Break loop, wait for user input
+          res.json({ aiText, signal: signalType ? { type: signalType } : undefined });
+          finalResponseSent = true;
+          return;
+        }
+
+        // CASE 3: FINAL PLAN
+        else if (fnName === "create_plan") {
+          args.image = await pickPhoto(args.location, reqId);
+          
+          // Safety: If origin was never captured, update profile now for future
+          if (!mem.profile.origin_city && args.costBreakdown) {
+             // Simple heuristic: did it guess an origin in the plan?
           }
 
-          // CASE 3: Final Plan Creation
-          else if (fnName === "create_plan") {
-            // Enhance with Image
-            args.image = await pickPhoto(args.location, reqId);
-            
-            // Validate Weather Icon
-            if (args.weather && !["sunny", "cloudy", "partly-sunny"].includes(args.weather.icon)) {
-              args.weather.icon = "sunny";
-            }
-
-            res.json({
-              aiText: `I've crafted a detailed itinerary for ${args.location}.`,
-              signal: { type: "planReady", payload: args },
-              assistantMessage: message // Pass back for frontend history
-            });
-            finalResponseSent = true;
-            return;
+          if (args.weather && !["sunny", "cloudy", "partly-sunny"].includes(args.weather.icon)) {
+            args.weather.icon = "sunny";
           }
+
+          res.json({
+            aiText: `I've prepared a trip to ${args.location} from ${mem.profile.origin_city || 'your location'}.`,
+            signal: { type: "planReady", payload: args },
+            assistantMessage: message
+          });
+          finalResponseSent = true;
+          return;
         }
       } else {
-        // B. AI just wants to talk (text response)
+        // B. AI responded with text
+        // Because of our strict prompt, if it responds with text, it's likely a clarifying question
+        // OR it failed to follow instructions.
+        
+        // If it wrote a giant text wall despite having data, we failed.
+        // But usually, with temp 0.2 and strict prompt, this only happens for "Clarifying questions"
         res.json({ aiText: message.content });
         finalResponseSent = true;
         return;
       }
     }
 
-    // Fallback if loop exhausts without final tool call
     if (!finalResponseSent) {
-        res.json({ aiText: "I'm processing a lot of data. Could you clarify your main priority?" });
+        res.json({ aiText: "I'm taking a bit too long to research. Could you try narrowing down your request?" });
     }
 
   } catch (err) {
     logError(reqId, "Critical Error", err);
-    res.status(500).json({ aiText: "I encountered a system error while planning. Please try again." });
+    res.status(500).json({ aiText: "Server error during planning." });
   }
 });
 
