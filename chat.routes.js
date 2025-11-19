@@ -138,20 +138,52 @@ async function performGoogleSearch(query, reqId) {
 
   const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
     query
-  )}&api_key=${SERPAPI_KEY}&num=8`;
+  )}&api_key=${SERPAPI_KEY}&num=10`;
   try {
     const res = await fetch(url);
     const data = await res.json();
     const snippets = [];
 
-    // Price boxes / answer boxes (often contain more structured info)
+    // Answer box / knowledge graph
     if (data.answer_box) {
       snippets.push(`AnswerBox: ${JSON.stringify(data.answer_box)}`);
     }
+    if (data.knowledge_graph) {
+      snippets.push(`KnowledgeGraph: ${JSON.stringify(data.knowledge_graph)}`);
+    }
+
+    // Flights (if SerpAPI exposes any flight-like structures in this search)
+    if (data.flights_results) {
+      snippets.push(
+        `FlightsResults: ${JSON.stringify(
+          data.flights_results.slice(0, 5)
+        )}`
+      );
+    }
+
+    // Hotels (Google Hotels / travel results sometimes appear in local_results/hotels_results)
+    if (data.hotels_results) {
+      snippets.push(
+        `HotelsResults: ${JSON.stringify(
+          data.hotels_results.slice(0, 5)
+        )}`
+      );
+    }
+
+    // Local results (restaurants, attractions, activities)
+    if (data.local_results) {
+      snippets.push(
+        `LocalResults: ${JSON.stringify(
+          data.local_results.places?.slice(0, 8) || data.local_results.slice(0, 8)
+        )}`
+      );
+    }
+
+    // Shopping / tickets / tours
     if (data.shopping_results && data.shopping_results.length) {
       snippets.push(
         `Shopping: ${JSON.stringify(
-          data.shopping_results.slice(0, 3).map((s) => ({
+          data.shopping_results.slice(0, 6).map((s) => ({
             title: s.title,
             price: s.price,
             source: s.source,
@@ -162,14 +194,14 @@ async function performGoogleSearch(query, reqId) {
 
     // Organic results – short, price-related if possible
     if (data.organic_results) {
-      data.organic_results.slice(0, 5).forEach((r) => {
+      data.organic_results.slice(0, 8).forEach((r) => {
         const snip = r.snippet || r.title || "";
-        snippets.push(`- ${r.title}: ${snip}`);
+        snippets.push(`Organic: ${r.title}: ${snip}`);
       });
     }
 
     const result = snippets.join("\n");
-    logInfo(reqId, `[SEARCH RESULT] Found data.`);
+    logInfo(reqId, `[SEARCH RESULT] Payload length: ${result.length}`);
     return result || "No details found.";
   } catch (e) {
     logError(reqId, "SerpApi Error", e);
@@ -202,15 +234,15 @@ const tools = [
     function: {
       name: "search_google",
       description:
-        "Search the web (real data via SerpAPI). Use this for: flight prices, hotel costs, typical trip budgets, visa requirements, safety, best time to visit, weather, and local attractions. " +
-        "For pricing, ALWAYS include origin, destination, and dates when known in the query. For visa, include nationality and destination country.",
+        "Search the web (real data via SerpAPI). Use this for: flight prices, hotel costs, typical trip budgets, visa requirements, safety, best time to visit, weather, local attractions, activities, and restaurants. " +
+        "For pricing, ALWAYS include origin, destination, and dates when known in the query. For visa, include nationality and destination country. You are allowed to call this multiple times per trip for more realism.",
       parameters: {
         type: "object",
         properties: {
           query: {
             type: "string",
             description:
-              "Concrete search query, e.g. 'Round trip flight Berlin to Dubai 12-19 March 2025 price' or 'visa requirements German citizen to Thailand 2025'.",
+              "Concrete search query, e.g. 'Round trip flight Berlin to Dubai 12-19 March 2025 price Emirates Qatar Turkish' or 'visa requirements German citizen to Thailand 2025'.",
           },
         },
         required: ["query"],
@@ -351,7 +383,7 @@ GENERAL RULES
    - Nationality (for visas): "What nationality is your passport?"
    - Budget level: "Do you prefer budget, balanced, or luxury options?"
    - Interests: "What are you into on this trip: beaches, nightlife, food, culture, nature, or something else?"
-   Keep questions concise and focused.
+   Keep questions concise and focused. Ask them as simple, single questions, not huge paragraphs.
 
 4. DATES and GUEST COUNT are SPECIAL and handled by tools ONLY:
    - You are FORBIDDEN to ask about dates or guest counts via text questions.
@@ -377,29 +409,55 @@ STEP 2: USE TOOLS FOR DATES & GUESTS (NO TEXT QUESTIONS)
 - If GUEST COUNT is missing => IMMEDIATELY call \`request_guests\`. DO NOT ask via text.
 - NEVER combine date and guest questions into a text message. They are handled by tools only.
 
-STEP 3: REALISTIC RESEARCH (PRICE + VISA + SAFETY)
+STEP 3: MAXIMUM-REALISM RESEARCH (MODE A)
 Once you know:
   - destination, AND
   - origin, AND
   - dates, AND
   - guest count
-you MUST call \`search_google\` to get REALISTIC pricing data.
+you MUST call \`search_google\` MULTIPLE TIMES to get REALISTIC data.
 
-For pricing use queries like:
-  - "round trip flight [ORIGIN] to [DESTINATION] [DATES] price per person"
-  - "hotel [DESTINATION] [DATES] average nightly price for [guest count] people"
-Optionally:
-  - "average daily cost in [DESTINATION] for [budget level] traveler"
-  - "popular paid activities in [DESTINATION] with prices"
+At minimum, call \`search_google\` with all of the following categories:
 
-If visas or safety were mentioned, call \`search_google\` for:
-  - "visa requirements [NATIONALITY] citizen to [COUNTRY] 2025"
-  - "is [DESTINATION] safe for tourists 2025"
+1) FLIGHTS (1–2 calls):
+   - "round trip flight [ORIGIN CITY or AIRPORT] to [DESTINATION CITY or AIRPORT] [DATES] price best airlines"
+   - Include terms like "Google Flights", "Skyscanner", "Qatar Airways", "Emirates", "Turkish Airlines".
+   Extract real airline names, flight numbers, airport names and codes (IATA), approximate prices, and durations.
 
-You can call \`search_google\` multiple times if needed, but keep it efficient.
+2) HOTELS (1–2 calls):
+   - "best 4 star hotels in [DESTINATION CITY] [DATES] price per night"
+   - "hotel deals [DESTINATION CITY] booking.com [DATES] 4 star"
+   Extract real hotel names, star ratings, nightly price ranges, and providers (Booking, Expedia, etc.).
 
-STEP 4: PLAN CREATION
-After getting enough search results for pricing:
+3) ACTIVITIES / TOURS (1–2 calls):
+   - "best tours and activities in [DESTINATION CITY] with prices Klook Viator"
+   - "snorkeling tours [DESTINATION] price per person"
+   Extract real tour names, operators, and prices.
+
+4) RESTAURANTS / FOOD (1 call):
+   - "best restaurants in [DESTINATION CITY] for tourists"
+   Extract real restaurant names.
+
+5) VISA (if relevant) (1 call):
+   - If user mentions visa OR if nationality is known and destination likely needs visas:
+     "visa requirements [NATIONALITY] citizen to [DESTINATION COUNTRY] 2025"
+
+6) SAFETY (1 call):
+   - "is [DESTINATION CITY or COUNTRY] safe for tourists 2025"
+
+7) WEATHER / BEST TIME (1 call):
+   - "weather in [DESTINATION CITY] in [MONTH OF TRAVEL] typical temperatures"
+   - "best time to visit [DESTINATION]"
+
+You are allowed to make around 5–9 \`search_google\` calls total for a complex trip. 
+Do not make 20 calls for the same trip; group related information where possible.
+
+For pricing and entities:
+- Use the search results to pick specific airlines, flight numbers, airports, hotels, tours, and restaurants.
+- DO NOT invent obviously fake airlines or hotels; prefer names that appear realistic or are mentioned in the results.
+
+STEP 4: PLAN CREATION (REAL ENTITIES)
+After getting enough search results for pricing and concrete options:
 - Do NOT summarize the search results in plain text first.
 - IMMEDIATELY call \`create_plan\`.
 - In \`create_plan\`, base all prices (total and breakdown) on the numbers and ranges you saw in the search results.
@@ -411,6 +469,47 @@ After getting enough search results for pricing:
 Date format in the itinerary:
 - \`date\`: "YYYY-MM-DD"
 - \`day\`: STRICT "MMM DD" (e.g. "Nov 20", "Oct 05"), NEVER "Friday" or "Day 1".
+
+==================================================
+REAL-WORLD ITINERARY REQUIREMENTS (MANDATORY)
+==================================================
+All itinerary items MUST reference **real, verifiable-sounding** entities. 
+Generic items are FORBIDDEN.
+
+Flights:
+- MUST use a real airline name.
+- MUST include a flight number that looks real (e.g. EK134, QR906, TK246).
+- MUST include a real departure airport code (IATA) and arrival airport code.
+- Format example title: 
+  "Flight EK134 from DME (Moscow Domodedovo) to MLE (Velana International)"
+- In details, mention approximate departure and arrival time and duration.
+
+Hotels:
+- MUST choose a real hotel name, preferably one that appears in search results.
+- MUST include hotel category (e.g., "4★" or "5★") and provider (Booking.com, Expedia etc. in costBreakdown).
+- Example: "Check in at Ocean Grand Hulhumale (4★)".
+
+Activities:
+- MUST reference real tours, real operators, or real attractions.
+- Example: "Snorkeling excursion with Secret Paradise Maldives (group tour)".
+
+Restaurants / Food:
+- MUST include real restaurant or venue names.
+- Example: "Dinner at Seagull Café House, Malé".
+
+Forbidden (do NOT use as titles or details):
+- "Stay at a midrange hotel"
+- "Flight from A to B"
+- "Beach day"
+- "Explore the city"
+- "Eat local food"
+- "Nice restaurant"
+- "Generic activity"
+
+All items must follow strict formatting:
+- **Itinerary.day**: "MMM DD"
+- **Itinerary.date**: "YYYY-MM-DD"
+- Every event must have: type, icon, time, duration, title, details.
 
 ==================================================
 INFO MODE
@@ -467,16 +566,16 @@ router.post("/travel", async (req, res) => {
 
     if (!hasKey) return res.json({ aiText: "Service Unavailable" });
 
-    // Recursive Agent Loop (Max 4 turns to allow: tool -> search -> plan)
+    // Recursive Agent Loop (Max depth increased to allow multiple searches)
     const runConversation = async (history, depth = 0) => {
-      if (depth > 4) return { aiText: "I'm working on your trip details..." };
+      if (depth > 8) return { aiText: "I'm finalizing your trip details..." };
 
       const completion = await client.chat.completions.create({
-        model: "gpt-4o", // you can upgrade this model name when you switch to GPT-5.1
+        model: "gpt-4o", // upgrade here when you move to GPT-5.1
         messages: history,
         tools,
         tool_choice: "auto",
-        temperature: 0.2, // low, but not zero, to allow robust reasoning
+        temperature: 0.2, // low, but with some flexibility
       });
 
       const msg = completion.choices[0].message;
@@ -522,6 +621,41 @@ router.post("/travel", async (req, res) => {
 
         // 3. PLAN -> Sanitize & Return
         if (name === "create_plan") {
+          // Enforce real-world specifics: rough filter to catch generic placeholders.
+          if (Array.isArray(args.itinerary)) {
+            for (const day of args.itinerary) {
+              if (!day || !Array.isArray(day.events)) continue;
+              for (const ev of day.events) {
+                if (!ev || typeof ev.title !== "string") continue;
+                const t = ev.title.toLowerCase();
+                const d = (ev.details || "").toLowerCase();
+
+                const isGeneric =
+                  t.includes("midrange hotel") ||
+                  t.includes("hotel in") ||
+                  t.includes("flight from") ||
+                  t.includes("beach day") ||
+                  t.includes("explore the city") ||
+                  t.includes("nice restaurant") ||
+                  t.includes("local food") ||
+                  t.includes("generic activity") ||
+                  d.includes("midrange hotel") ||
+                  d.includes("hotel in") ||
+                  d.includes("flight from") ||
+                  d.includes("beach day") ||
+                  d.includes("explore the city") ||
+                  d.includes("nice restaurant") ||
+                  d.includes("local food") ||
+                  d.includes("generic activity");
+
+                if (isGeneric) {
+                  // Mark clearly so you can detect in frontend if needed
+                  ev.title = "INVALID_GENERIC_EVENT — PLEASE REGENERATE WITH REAL NAMES";
+                }
+              }
+            }
+          }
+
           // Ensure image
           args.image = await pickPhoto(args.location, reqId);
           // Fallback weather
@@ -554,7 +688,6 @@ router.post("/travel", async (req, res) => {
         lower.includes("how many") &&
         (lower.includes("people") || lower.includes("guests"));
 
-      // If both are asked in one sentence, prefer date tool first, then guests via next turn.
       if (asksDates) {
         logInfo(
           reqId,
