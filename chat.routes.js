@@ -5,6 +5,11 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+// Optional: catch unhandled promise rejections globally (very useful in dev)
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED PROMISE REJECTION]", reason);
+});
+
 // --- 1. SETUP ---
 let FETCH_SOURCE = "native";
 try {
@@ -39,8 +44,8 @@ const getMem = (userId) => {
       profile: {
         origin_city: null,
         nationality: null,
-        preferred_travel_type: [], // e.g. "backpacking", "luxury"
-        interests: [], // e.g. "beaches", "nightlife"
+        preferred_travel_type: [],
+        interests: [],
         budget: { level: "balanced" }, // "budget" | "balanced" | "luxury"
       },
     });
@@ -48,7 +53,7 @@ const getMem = (userId) => {
   return userMem.get(userId);
 };
 
-// Extract profile info from conversation (very lightweight, safe)
+// Extract profile info from conversation (very lightweight)
 function updateProfileFromHistory(messages, mem) {
   const lastUserMsg = messages.filter((m) => m.role === "user").pop();
   if (!lastUserMsg) return;
@@ -152,7 +157,7 @@ async function performGoogleSearch(query, reqId) {
       snippets.push(`KnowledgeGraph: ${JSON.stringify(data.knowledge_graph)}`);
     }
 
-    // Flights (if SerpAPI exposes any flight-like structures in this search)
+    // Flights (if present)
     if (data.flights_results) {
       snippets.push(
         `FlightsResults: ${JSON.stringify(
@@ -161,7 +166,7 @@ async function performGoogleSearch(query, reqId) {
       );
     }
 
-    // Hotels (Google Hotels / travel results sometimes appear in local_results/hotels_results)
+    // Hotels (if present)
     if (data.hotels_results) {
       snippets.push(
         `HotelsResults: ${JSON.stringify(
@@ -172,11 +177,9 @@ async function performGoogleSearch(query, reqId) {
 
     // Local results (restaurants, attractions, activities)
     if (data.local_results) {
-      snippets.push(
-        `LocalResults: ${JSON.stringify(
-          data.local_results.places?.slice(0, 8) || data.local_results.slice(0, 8)
-        )}`
-      );
+      const places =
+        data.local_results.places?.slice(0, 8) || data.local_results.slice(0, 8);
+      snippets.push(`LocalResults: ${JSON.stringify(places)}`);
     }
 
     // Shopping / tickets / tours
@@ -192,7 +195,7 @@ async function performGoogleSearch(query, reqId) {
       );
     }
 
-    // Organic results – short, price-related if possible
+    // Organic results
     if (data.organic_results) {
       data.organic_results.slice(0, 8).forEach((r) => {
         const snip = r.snippet || r.title || "";
@@ -283,7 +286,6 @@ const tools = [
                   type: "string",
                   description: "YYYY-MM-DD",
                 },
-                // STRICT DATE FORMATTING INSTRUCTION
                 day: {
                   type: "string",
                   description:
@@ -409,52 +411,14 @@ STEP 2: USE TOOLS FOR DATES & GUESTS (NO TEXT QUESTIONS)
 - If GUEST COUNT is missing => IMMEDIATELY call \`request_guests\`. DO NOT ask via text.
 - NEVER combine date and guest questions into a text message. They are handled by tools only.
 
-STEP 3: MAXIMUM-REALISM RESEARCH (MODE A)
+STEP 3: MAXIMUM-REALISM RESEARCH
 Once you know:
   - destination, AND
   - origin, AND
   - dates, AND
   - guest count
-you MUST call \`search_google\` MULTIPLE TIMES to get REALISTIC data.
-
-At minimum, call \`search_google\` with all of the following categories:
-
-1) FLIGHTS (1–2 calls):
-   - "round trip flight [ORIGIN CITY or AIRPORT] to [DESTINATION CITY or AIRPORT] [DATES] price best airlines"
-   - Include terms like "Google Flights", "Skyscanner", "Qatar Airways", "Emirates", "Turkish Airlines".
-   Extract real airline names, flight numbers, airport names and codes (IATA), approximate prices, and durations.
-
-2) HOTELS (1–2 calls):
-   - "best 4 star hotels in [DESTINATION CITY] [DATES] price per night"
-   - "hotel deals [DESTINATION CITY] booking.com [DATES] 4 star"
-   Extract real hotel names, star ratings, nightly price ranges, and providers (Booking, Expedia, etc.).
-
-3) ACTIVITIES / TOURS (1–2 calls):
-   - "best tours and activities in [DESTINATION CITY] with prices Klook Viator"
-   - "snorkeling tours [DESTINATION] price per person"
-   Extract real tour names, operators, and prices.
-
-4) RESTAURANTS / FOOD (1 call):
-   - "best restaurants in [DESTINATION CITY] for tourists"
-   Extract real restaurant names.
-
-5) VISA (if relevant) (1 call):
-   - If user mentions visa OR if nationality is known and destination likely needs visas:
-     "visa requirements [NATIONALITY] citizen to [DESTINATION COUNTRY] 2025"
-
-6) SAFETY (1 call):
-   - "is [DESTINATION CITY or COUNTRY] safe for tourists 2025"
-
-7) WEATHER / BEST TIME (1 call):
-   - "weather in [DESTINATION CITY] in [MONTH OF TRAVEL] typical temperatures"
-   - "best time to visit [DESTINATION]"
-
-You are allowed to make around 5–9 \`search_google\` calls total for a complex trip. 
-Do not make 20 calls for the same trip; group related information where possible.
-
-For pricing and entities:
-- Use the search results to pick specific airlines, flight numbers, airports, hotels, tours, and restaurants.
-- DO NOT invent obviously fake airlines or hotels; prefer names that appear realistic or are mentioned in the results.
+you SHOULD call \`search_google\` MULTIPLE TIMES to get REALISTIC data (flights, hotels, activities, restaurants, visa, safety, weather, typical daily costs).
+Group related information where possible; don't spam the tool unnecessarily.
 
 STEP 4: PLAN CREATION (REAL ENTITIES)
 After getting enough search results for pricing and concrete options:
@@ -479,14 +443,13 @@ Generic items are FORBIDDEN.
 Flights:
 - MUST use a real airline name.
 - MUST include a flight number that looks real (e.g. EK134, QR906, TK246).
-- MUST include a real departure airport code (IATA) and arrival airport code.
-- Format example title: 
-  "Flight EK134 from DME (Moscow Domodedovo) to MLE (Velana International)"
+- MUST include a departure airport code (IATA) and arrival airport code.
+- Example title: "Flight EK134 from DME (Moscow Domodedovo) to MLE (Velana International)"
 - In details, mention approximate departure and arrival time and duration.
 
 Hotels:
 - MUST choose a real hotel name, preferably one that appears in search results.
-- MUST include hotel category (e.g., "4★" or "5★") and provider (Booking.com, Expedia etc. in costBreakdown).
+- MUST include hotel category (e.g., "4★" or "5★").
 - Example: "Check in at Ocean Grand Hulhumale (4★)".
 
 Activities:
@@ -564,54 +527,195 @@ router.post("/travel", async (req, res) => {
     const mem = getMem(userId);
     updateProfileFromHistory(messages, mem);
 
-    if (!hasKey) return res.json({ aiText: "Service Unavailable" });
+    if (!hasKey) {
+      return res.json({ aiText: "Service Unavailable" });
+    }
 
-    // Recursive Agent Loop (Max depth increased to allow multiple searches)
     const runConversation = async (history, depth = 0) => {
-      if (depth > 8) return { aiText: "I'm finalizing your trip details..." };
-
-      const completion = await client.chat.completions.create({
-        model: "gpt-4o", // upgrade here when you move to GPT-5.1
-        messages: history,
-        tools,
-        tool_choice: "auto",
-        temperature: 0.2, // low, but with some flexibility
-      });
-
-      const msg = completion.choices[0].message;
-
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        // We only handle one tool call at a time to keep control simple
-        const tool = msg.tool_calls[0];
-        const name = tool.function.name;
-        const args =
-          typeof tool.function.arguments === "string"
-            ? JSON.parse(tool.function.arguments || "{}")
-            : tool.function.arguments || {};
-
-        logInfo(reqId, `[Tool] ${name}`, args);
-
-        // 1. SEARCH -> Recurse immediately (Don't talk to user yet)
-        if (name === "search_google") {
-          const result = await performGoogleSearch(args.query, reqId);
-          const newHistory = [
-            ...history,
-            msg,
-            { role: "tool", tool_call_id: tool.id, content: result },
-          ];
-          // Recurse: The AI sees the result and may call create_plan or answer text
-          return runConversation(newHistory, depth + 1);
+      try {
+        if (depth > 8) {
+          logError(reqId, "Max depth exceeded");
+          return {
+            aiText:
+              "I'm having trouble finalizing your trip. Please try adjusting your request or starting again.",
+          };
         }
 
-        // 2. UI SIGNALS -> Return to Frontend
-        if (name === "request_dates") {
+        const completion = await client.chat.completions.create({
+          model: "gpt-4o", // upgrade here when you move to GPT-5.1
+          messages: history,
+          tools,
+          tool_choice: "auto",
+          temperature: 0.2,
+        });
+
+        const msg = completion.choices[0].message;
+
+        // TOOL CALLS
+        if (msg.tool_calls && msg.tool_calls.length > 0) {
+          const tool = msg.tool_calls[0];
+          const name = tool.function.name;
+
+          // SAFE JSON PARSE
+          let args = {};
+          try {
+            const raw = tool.function.arguments || "{}";
+            args = typeof raw === "string" ? JSON.parse(raw) : raw || {};
+          } catch (e) {
+            logError(
+              reqId,
+              "[JSON PARSE ERROR]",
+              e?.message,
+              tool.function.arguments
+            );
+            // Don't crash; tell frontend something went wrong
+            return {
+              aiText:
+                "I ran into a formatting issue while building your plan. Please rephrase your request slightly and try again.",
+            };
+          }
+
+          logInfo(reqId, `[Tool] ${name}`, args);
+
+          // 1. SEARCH -> Recurse immediately (No UI text yet)
+          if (name === "search_google") {
+            const result = await performGoogleSearch(args.query, reqId);
+            const newHistory = [
+              ...history,
+              msg,
+              { role: "tool", tool_call_id: tool.id, content: result },
+            ];
+            return runConversation(newHistory, depth + 1);
+          }
+
+          // 2. UI SIGNALS -> Return to Frontend
+          if (name === "request_dates") {
+            return {
+              aiText: "Please choose your travel dates.",
+              signal: { type: "dateNeeded" },
+              assistantMessage: msg,
+            };
+          }
+
+          if (name === "request_guests") {
+            return {
+              aiText: "Please specify how many people are traveling.",
+              signal: { type: "guestsNeeded" },
+              assistantMessage: msg,
+            };
+          }
+
+          // 3. PLAN -> Sanitize & Return
+          if (name === "create_plan") {
+            try {
+              // Normalize arrays
+              if (!Array.isArray(args.itinerary)) args.itinerary = [];
+              if (!Array.isArray(args.costBreakdown)) args.costBreakdown = [];
+
+              // Defensive itinerary sanitization
+              for (const day of args.itinerary) {
+                if (!day || !Array.isArray(day.events)) continue;
+
+                for (const ev of day.events) {
+                  if (!ev || typeof ev.title !== "string") continue;
+
+                  const t = ev.title.toLowerCase();
+                  const d = (ev.details || "").toLowerCase();
+
+                  const isGeneric =
+                    t.includes("midrange hotel") ||
+                    t.includes("hotel in") ||
+                    t.includes("flight from") ||
+                    t.includes("beach day") ||
+                    t.includes("explore the city") ||
+                    t.includes("nice restaurant") ||
+                    t.includes("local food") ||
+                    t.includes("generic activity") ||
+                    d.includes("midrange hotel") ||
+                    d.includes("hotel in") ||
+                    d.includes("flight from") ||
+                    d.includes("beach day") ||
+                    d.includes("explore the city") ||
+                    d.includes("nice restaurant") ||
+                    d.includes("local food") ||
+                    d.includes("generic activity");
+
+                  if (isGeneric) {
+                    ev.title =
+                      "INVALID_GENERIC_EVENT — PLEASE REGENERATE WITH REAL NAMES";
+                  }
+                }
+              }
+            } catch (e) {
+              logError(reqId, "[SANITIZE ERROR]", e?.message, args);
+              // Do not fail the whole request because of one bad event
+            }
+
+            // Ensure image
+            try {
+              args.image = await pickPhoto(args.location, reqId);
+            } catch (e) {
+              logError(reqId, "[IMAGE PICK ERROR]", e?.message);
+              args.image = FALLBACK_IMAGE_URL;
+            }
+
+            // Fallback weather
+            if (!args.weather || typeof args.weather !== "object") {
+              args.weather = { temp: 25, icon: "sunny" };
+            } else if (!args.weather.icon) {
+              args.weather.icon = "sunny";
+            }
+
+            // Fallback core fields
+            if (typeof args.price !== "number" || Number.isNaN(args.price)) {
+              args.price = 0;
+            }
+            if (!args.location) args.location = "Destination";
+            if (!args.country) args.country = "Unknown";
+            if (!args.dateRange) args.dateRange = "Dates not specified";
+            if (!args.description) {
+              args.description = `Trip to ${args.location}`;
+            }
+
+            return {
+              aiText: `I've prepared a trip plan to ${args.location} with an estimated total cost of $${args.price}.`,
+              signal: { type: "planReady", payload: args },
+              assistantMessage: msg,
+            };
+          }
+        }
+
+        // TEXT-ONLY RESPONSE HANDLING
+        let text = msg.content || "";
+
+        // Safety net: intercept date/guest text questions and convert to signals
+        const lower = text.toLowerCase();
+        const asksDates =
+          lower.includes("when") &&
+          (lower.includes("travel") ||
+            lower.includes("trip") ||
+            lower.includes("go"));
+        const asksGuests =
+          lower.includes("how many") &&
+          (lower.includes("people") || lower.includes("guests"));
+
+        if (asksDates) {
+          logInfo(
+            reqId,
+            "[Guardrail] Intercepted text question about dates. Triggering request_dates signal."
+          );
           return {
             aiText: "Please choose your travel dates.",
             signal: { type: "dateNeeded" },
             assistantMessage: msg,
           };
         }
-        if (name === "request_guests") {
+
+        if (asksGuests) {
+          logInfo(
+            reqId,
+            "[Guardrail] Intercepted text question about guests. Triggering request_guests signal."
+          );
           return {
             aiText: "Please specify how many people are traveling.",
             signal: { type: "guestsNeeded" },
@@ -619,100 +723,16 @@ router.post("/travel", async (req, res) => {
           };
         }
 
-        // 3. PLAN -> Sanitize & Return
-        if (name === "create_plan") {
-          // Enforce real-world specifics: rough filter to catch generic placeholders.
-          if (Array.isArray(args.itinerary)) {
-            for (const day of args.itinerary) {
-              if (!day || !Array.isArray(day.events)) continue;
-              for (const ev of day.events) {
-                if (!ev || typeof ev.title !== "string") continue;
-                const t = ev.title.toLowerCase();
-                const d = (ev.details || "").toLowerCase();
-
-                const isGeneric =
-                  t.includes("midrange hotel") ||
-                  t.includes("hotel in") ||
-                  t.includes("flight from") ||
-                  t.includes("beach day") ||
-                  t.includes("explore the city") ||
-                  t.includes("nice restaurant") ||
-                  t.includes("local food") ||
-                  t.includes("generic activity") ||
-                  d.includes("midrange hotel") ||
-                  d.includes("hotel in") ||
-                  d.includes("flight from") ||
-                  d.includes("beach day") ||
-                  d.includes("explore the city") ||
-                  d.includes("nice restaurant") ||
-                  d.includes("local food") ||
-                  d.includes("generic activity");
-
-                if (isGeneric) {
-                  // Mark clearly so you can detect in frontend if needed
-                  ev.title = "INVALID_GENERIC_EVENT — PLEASE REGENERATE WITH REAL NAMES";
-                }
-              }
-            }
-          }
-
-          // Ensure image
-          args.image = await pickPhoto(args.location, reqId);
-          // Fallback weather
-          if (!args.weather || !args.weather.icon) {
-            args.weather = { temp: 25, icon: "sunny" };
-          }
-          if (!Array.isArray(args.itinerary)) args.itinerary = [];
-          if (!Array.isArray(args.costBreakdown)) args.costBreakdown = [];
-
-          return {
-            aiText: `I've prepared a trip plan to ${args.location} with an estimated total cost of $${args.price}.`,
-            signal: { type: "planReady", payload: args },
-            assistantMessage: msg,
-          };
-        }
-      }
-
-      // B. TEXT RESPONSE HANDLING
-      let text = msg.content || "";
-
-      // Safety net: If the model accidentally asks about dates or guests via text,
-      // we intercept and convert it into the proper tool-based flow.
-      const lower = text.toLowerCase();
-      const asksDates =
-        lower.includes("when") &&
-        (lower.includes("travel") ||
-          lower.includes("trip") ||
-          lower.includes("go"));
-      const asksGuests =
-        lower.includes("how many") &&
-        (lower.includes("people") || lower.includes("guests"));
-
-      if (asksDates) {
-        logInfo(
-          reqId,
-          "[Guardrail] Intercepted text question about dates. Triggering request_dates tool signal."
-        );
+        // Otherwise this is a normal clarifying / info response
+        return { aiText: text };
+      } catch (err) {
+        logError(reqId, "[runConversation ERROR]", err);
+        // Do NOT throw here; return a safe response instead of 500
         return {
-          aiText: "Please choose your travel dates.",
-          signal: { type: "dateNeeded" },
-          assistantMessage: msg,
+          aiText:
+            "I ran into an internal issue while building your trip. Please tweak your request slightly and try again.",
         };
       }
-      if (asksGuests) {
-        logInfo(
-          reqId,
-          "[Guardrail] Intercepted text question about guests. Triggering request_guests tool signal."
-        );
-        return {
-          aiText: "Please specify how many people are traveling.",
-          signal: { type: "guestsNeeded" },
-          assistantMessage: msg,
-        };
-      }
-
-      // Otherwise this is a normal clarifying / info response
-      return { aiText: text };
     };
 
     const systemPrompt = getSystemPrompt(mem.profile);
@@ -724,7 +744,7 @@ router.post("/travel", async (req, res) => {
     const response = await runConversation(convo);
     res.json(response);
   } catch (err) {
-    logError(reqId, "Error", err);
+    logError(reqId, "[ROUTE ERROR]", err);
     res.status(500).json({ aiText: "System error." });
   }
 });
