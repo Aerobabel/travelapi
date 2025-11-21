@@ -83,7 +83,6 @@ async function pickPhoto(dest, reqId) {
   if (!UNSPLASH_ACCESS_KEY) return FALLBACK_IMAGE_URL;
 
   const query = encodeURIComponent(`${dest} travel tourist landmark`);
-  // Orientation landscape ensures it looks good in cards
   const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=1&orientation=landscape`;
 
   try {
@@ -127,14 +126,13 @@ function updateProfileFromHistory(messages, mem) {
   const lower = text.toLowerCase();
   const profile = mem.profile;
 
-  // Basic Extraction Regex
+  // Basic Extraction
   const fromMatch = lower.match(/from\s+([a-z\s]+)/i);
   if (fromMatch?.[1]) profile.origin_city = fromMatch[1].trim();
 
   const natMatch = lower.match(/i am from\s+([a-z\s]+)/i);
   if (natMatch?.[1]) profile.nationality = natMatch[1].trim();
 
-  // Keywords
   ["beach", "active", "urban", "relaxing"].forEach((t) => {
     if (lower.includes(t) && !profile.preferred_travel_type.includes(t))
       profile.preferred_travel_type.push(t);
@@ -176,7 +174,7 @@ function formatDateToMMMDD(dateStr) {
   return `${month} ${day}`;
 }
 
-// --- 4. SERPAPI SEARCH LAYER (ENHANCED) ------------------------------------
+// --- 4. SERPAPI SEARCH LAYER -----------------------------------------------
 
 async function performGoogleSearch(rawQuery, reqId) {
   if (!SERPAPI_KEY) {
@@ -197,7 +195,6 @@ async function performGoogleSearch(rawQuery, reqId) {
       )}&hl=en&type=search&api_key=${SERPAPI_KEY}`;
       
       const data = await fetch(url).then((r) => r.json());
-      // Extract useful fields only to save tokens
       const results = (data.local_results || []).slice(0, 7).map(r => ({
         title: r.title,
         price: r.price,
@@ -208,11 +205,9 @@ async function performGoogleSearch(rawQuery, reqId) {
       return JSON.stringify(results);
     }
 
-    // --- HOTELS (REAL PRICES) ---
+    // --- HOTELS ---
     if (startsWith("__hotels__")) {
       const loc = query.replace("__hotels__", "").trim();
-      // Extract dates from query if possible (e.g. "__hotels__ Paris 2025-10-10") to get real prices
-      // This is a basic pass-through. Ideally, we parse dates.
       const url = `https://serpapi.com/search.json?engine=google_hotels&q=${encodeURIComponent(
         loc
       )}&currency=USD&api_key=${SERPAPI_KEY}`;
@@ -228,18 +223,14 @@ async function performGoogleSearch(rawQuery, reqId) {
       return JSON.stringify(results);
     }
 
-    // --- FLIGHTS (REAL PRICES) ---
+    // --- FLIGHTS ---
     if (startsWith("__flights__")) {
       const cleaned = query.replace("__flights__", "").trim();
-      // Note: Google Flights engine on SerpAPI is powerful but sensitive to syntax.
-      // We fallback to standard search if flights engine fails, but let's try flights engine first.
       const url = `https://serpapi.com/search.json?engine=google_flights&q=${encodeURIComponent(
         cleaned
       )}&currency=USD&api_key=${SERPAPI_KEY}`;
       
       const data = await fetch(url).then((r) => r.json());
-      
-      // Parse the complex flights response
       const flights = data.best_flights || data.other_flights || [];
       const simplerFlights = flights.slice(0, 5).map(f => {
         const leg = f.flights?.[0] || {};
@@ -275,7 +266,7 @@ async function performGoogleSearch(rawQuery, reqId) {
       return JSON.stringify(results);
     }
 
-    // --- FALLBACK: GENERAL SEARCH ---
+    // --- FALLBACK ---
     const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
       query
     )}&api_key=${SERPAPI_KEY}&num=8`;
@@ -341,7 +332,7 @@ const tools = [
           country: { type: "string" },
           dateRange: { type: "string" },
           description: { type: "string" },
-          price: { type: "number", description: "Total estimated cost including flights + accommodation + daily spend" },
+          price: { type: "number", description: "Total estimated cost" },
           weather: {
             type: "object",
             properties: { temp: { type: "number" }, icon: { type: "string" } },
@@ -425,7 +416,7 @@ const tools = [
   },
 ];
 
-// --- 6. SYSTEM PROMPT (ENHANCED FOR RICHNESS & REALISM) ---------------------
+// --- 6. SYSTEM PROMPT -------------------------------------------------------
 
 const getSystemPrompt = (profile) => `
 You are an elite AI TRAVEL ARCHITECT. Your goal is to build **realistic, bookable, and rich** itineraries.
@@ -487,7 +478,7 @@ function normalizeMessages(messages = []) {
       }
       let role = m.role;
       if (role === "ai") role = "assistant";
-      if (role === "plan") role = "assistant"; // treat previous plans as assistant history
+      if (role === "plan") role = "assistant"; 
 
       let content = m.content || m.text || "";
       if (role === "assistant" && m.payload) {
@@ -517,9 +508,8 @@ router.post("/travel", async (req, res) => {
       ...normalizeMessages(messages),
     ];
 
-    // Recursive conversation loop
     const runConversation = async (conversation, depth = 0) => {
-      // --- SAFETY: FORCE PLAN CREATION IF LOOP IS TOO LONG ---
+      // --- SAFETY VALVE ---
       if (depth > 7) {
         logInfo(reqId, "Forcing plan creation due to depth");
         conversation.push({
@@ -537,7 +527,7 @@ router.post("/travel", async (req, res) => {
           messages: conversation,
           tools,
           tool_choice: "auto",
-          temperature: 0.2, // Lower temperature for more factual/rigorous plans
+          temperature: 0.2,
         });
       } catch (err) {
         logError(reqId, "OpenAI Error", err);
@@ -547,67 +537,79 @@ router.post("/travel", async (req, res) => {
       const msg = completion.choices[0]?.message;
       if (!msg) return { aiText: "No response." };
 
-      // --- TOOL HANDLING ---
+      // --- TOOL CALL HANDLING (CRITICAL FIX) ---
       if (msg.tool_calls?.length) {
-        const toolCall = msg.tool_calls[0]; // Force single tool use per turn
+        // OpenAI sometimes ignores instructions and calls 3 tools at once (e.g. search, dates, plan).
+        // If we just process [0] and send the original 'msg' back to history, OpenAI crashes 
+        // saying "You didn't reply to tool_calls[1] and [2]".
+        // FIX: We create a "Sanitized" version of the message containing ONLY the tool we act on.
+        
+        const toolCall = msg.tool_calls[0]; // We only process the first one
         const toolName = toolCall.function.name;
         let args = {};
         try { args = JSON.parse(toolCall.function.arguments || "{}"); } catch (e) {}
 
         logInfo(reqId, `[Tool] ${toolName}`, args);
 
-        // 1. Search
+        // 1. Sanitize History: Create a copy of message that ONLY has this specific tool call
+        const assistantMsgSanitized = {
+            ...msg,
+            tool_calls: [toolCall] 
+        };
+        const newHistory = [...conversation, assistantMsgSanitized];
+
+        // 2. Execute Logic
+        // A. SEARCH -> RECURSE
         if (toolName === "search_google") {
-            // Add assistant's tool call to history
-            const newHistory = [...conversation, msg];
-            // Execute search
             const result = await performGoogleSearch(args.query, reqId);
-            // Add result to history
             newHistory.push({
                 role: "tool",
                 tool_call_id: toolCall.id,
                 content: result
             });
-            // Recurse
             return runConversation(newHistory, depth + 1);
         }
 
-        // 2. UI Triggers
+        // B. UI ACTIONS -> RETURN TO FRONTEND (EXIT LOOP)
         if (toolName === "request_dates") {
-          return { aiText: "When are you planning to go?", signal: { type: "dateNeeded" }, assistantMessage: msg };
+          return { 
+              aiText: "When are you planning to go?", 
+              signal: { type: "dateNeeded" }, 
+              assistantMessage: assistantMsgSanitized 
+          };
         }
         if (toolName === "request_guests") {
-          return { aiText: "How many people?", signal: { type: "guestsNeeded" }, assistantMessage: msg };
+          return { 
+              aiText: "How many people?", 
+              signal: { type: "guestsNeeded" }, 
+              assistantMessage: assistantMsgSanitized 
+          };
         }
 
-        // 3. Create Plan (The Heavy Lifter)
+        // C. CREATE PLAN -> RETURN TO FRONTEND (EXIT LOOP)
         if (toolName === "create_plan") {
           const plan = { ...args };
           
-          // Defaults & Cleanups
+          // Data Cleanup
           if (!plan.itinerary) plan.itinerary = [];
           if (!plan.flights) plan.flights = [];
           if (!plan.costBreakdown) plan.costBreakdown = [];
           if (!plan.currency) plan.currency = "USD";
           
-          // Ensure Multi-city
           if (!plan.cities) plan.cities = [];
           if (plan.cities.length > 1) plan.multiCity = true;
 
-          // Image Fetch
+          // Image
           try {
              const q = plan.multiCity ? plan.cities[0] : plan.location;
              plan.image = await pickPhoto(q, reqId);
           } catch(e) { plan.image = FALLBACK_IMAGE_URL; }
 
-          // Formatting Dates for Display
+          // Format Dates
           plan.itinerary.forEach(day => {
-             // Ensure generic placeholders are removed if AI failed to do so
              day.events.forEach(e => {
                  if(e.provider === "Local Restaurant") e.provider = "Recommended Local Spot";
              });
-             
-             // Format dates to "Nov 20" for frontend
              if(day.date) {
                  const nice = formatDateToMMMDD(day.date);
                  day.date = nice;
@@ -615,7 +617,7 @@ router.post("/travel", async (req, res) => {
              }
           });
 
-          // Construct Breakdown if empty (AI sometimes skips this)
+          // Cost Breakdown Fallback
           if (plan.costBreakdown.length === 0 && plan.flights.length > 0) {
               plan.costBreakdown.push({
                   item: "Flights",
@@ -629,7 +631,7 @@ router.post("/travel", async (req, res) => {
           return {
             aiText: `I've built a plan for ${plan.location}.`,
             signal: { type: "planReady", payload: plan },
-            assistantMessage: msg
+            assistantMessage: assistantMsgSanitized
           };
         }
       }
