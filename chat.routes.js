@@ -126,7 +126,6 @@ function updateProfileFromHistory(messages, mem) {
   const lower = text.toLowerCase();
   const profile = mem.profile;
 
-  // Basic Extraction
   const fromMatch = lower.match(/from\s+([a-z\s]+)/i);
   if (fromMatch?.[1]) profile.origin_city = fromMatch[1].trim();
 
@@ -193,14 +192,15 @@ async function performGoogleSearch(rawQuery, reqId) {
       const url = `https://serpapi.com/search.json?engine=google_local&q=${encodeURIComponent(
         loc + " best restaurants"
       )}&hl=en&type=search&api_key=${SERPAPI_KEY}`;
-      
+
       const data = await fetch(url).then((r) => r.json());
-      const results = (data.local_results || []).slice(0, 7).map(r => ({
+      const base = data.local_results || data.places || [];
+      const results = base.slice(0, 7).map((r) => ({
         title: r.title,
         price: r.price,
         rating: r.rating,
         type: r.type,
-        address: r.address
+        address: r.address,
       }));
       return JSON.stringify(results);
     }
@@ -211,14 +211,14 @@ async function performGoogleSearch(rawQuery, reqId) {
       const url = `https://serpapi.com/search.json?engine=google_hotels&q=${encodeURIComponent(
         loc
       )}&currency=USD&api_key=${SERPAPI_KEY}`;
-      
+
       const data = await fetch(url).then((r) => r.json());
-      const results = (data.properties || []).slice(0, 7).map(p => ({
+      const results = (data.properties || []).slice(0, 7).map((p) => ({
         name: p.name,
         total_rate: p.total_rate?.lowest || p.rate_per_night?.lowest,
         rating: p.overall_rating,
         description: p.description,
-        link: p.link
+        link: p.link,
       }));
       return JSON.stringify(results);
     }
@@ -229,23 +229,29 @@ async function performGoogleSearch(rawQuery, reqId) {
       const url = `https://serpapi.com/search.json?engine=google_flights&q=${encodeURIComponent(
         cleaned
       )}&currency=USD&api_key=${SERPAPI_KEY}`;
-      
+
       const data = await fetch(url).then((r) => r.json());
       const flights = data.best_flights || data.other_flights || [];
-      const simplerFlights = flights.slice(0, 5).map(f => {
-        const leg = f.flights?.[0] || {};
+      const simplerFlights = flights.slice(0, 5).map((f) => {
+        const leg = (f.flights && f.flights[0]) || {};
+        const dep = leg.departure_airport || {};
+        const arr = leg.arrival_airport || {};
         return {
           airline: leg.airline,
           flight_number: leg.flight_number,
-          departure: leg.departure_airport?.time,
-          arrival: leg.arrival_airport?.time,
+          departure_time: dep.time,
+          arrival_time: arr.time,
+          departure_airport_code: dep.code || dep.airport_code,
+          departure_airport_name: dep.name,
+          arrival_airport_code: arr.code || arr.airport_code,
+          arrival_airport_name: arr.name,
           duration: f.total_duration,
-          price: f.price
+          price: f.price,
         };
       });
 
-      return simplerFlights.length > 0 
-        ? JSON.stringify(simplerFlights) 
+      return simplerFlights.length > 0
+        ? JSON.stringify(simplerFlights)
         : "No direct flight data found via API. Use estimates based on 'Approx 500-800 USD'.";
     }
 
@@ -255,13 +261,14 @@ async function performGoogleSearch(rawQuery, reqId) {
       const url = `https://serpapi.com/search.json?engine=google_local&q=${encodeURIComponent(
         loc + " must do things"
       )}&hl=en&type=search&api_key=${SERPAPI_KEY}`;
-      
+
       const data = await fetch(url).then((r) => r.json());
-      const results = (data.local_results || []).slice(0, 10).map(r => ({
+      const base = data.local_results || data.places || [];
+      const results = base.slice(0, 10).map((r) => ({
         title: r.title,
         type: r.type,
         rating: r.rating,
-        description: r.description
+        description: r.description,
       }));
       return JSON.stringify(results);
     }
@@ -280,7 +287,6 @@ async function performGoogleSearch(rawQuery, reqId) {
       });
     }
     return out.join("\n\n") || "No relevant details found.";
-
   } catch (err) {
     logError(reqId, "SerpAPI Error", err);
     return "Search API failed. Proceed with best estimates.";
@@ -294,7 +300,8 @@ const tools = [
     type: "function",
     function: {
       name: "request_dates",
-      description: "Trigger the date picker UI. Call this IMMEDIATELY when the user agrees on a destination.",
+      description:
+        "Trigger the date picker UI. Call this IMMEDIATELY once the destination is clear or the user shows interest in planning a trip. NEVER ask about dates via text.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -302,7 +309,8 @@ const tools = [
     type: "function",
     function: {
       name: "request_guests",
-      description: "Trigger the guest picker UI. Call this IMMEDIATELY when you need to know who is traveling.",
+      description:
+        "Trigger the guest picker UI. Call this IMMEDIATELY after (or together with) dates are requested. NEVER ask 'how many people' via text.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -310,7 +318,8 @@ const tools = [
     type: "function",
     function: {
       name: "search_google",
-      description: "Search real data. Use prefixes: '__flights__ Helsinki to Paris', '__hotels__ Bali', '__restaurants__ Rome', '__activities__ Tokyo', '__visa__ US to China', '__weather__ London Dec'.",
+      description:
+        "Search real data. Use prefixes: '__flights__ Helsinki to Paris Jun 10-17', '__hotels__ Bali', '__restaurants__ Rome', '__activities__ Tokyo'. Always use real city names and realistic query phrasing.",
       parameters: {
         type: "object",
         properties: {
@@ -324,7 +333,8 @@ const tools = [
     type: "function",
     function: {
       name: "create_plan",
-      description: "Finalize the trip. ONLY call this after you have searched for and found real flights, real hotels, and activities.",
+      description:
+        "Finalize the trip. ONLY call this after you have searched for and found real flights, real hotels, and real activities, and you have dates + guests from tools.",
       parameters: {
         type: "object",
         properties: {
@@ -342,20 +352,36 @@ const tools = [
             items: {
               type: "object",
               properties: {
-                date: { type: "string", description: "ISO format '2025-11-20'" },
-                day: { type: "string", description: "ISO format '2025-11-20'" },
+                date: {
+                  type: "string",
+                  description: "ISO format '2025-11-20'",
+                },
+                day: {
+                  type: "string",
+                  description: "ISO format '2025-11-20' (backend reformats to 'Nov 20')",
+                },
                 events: {
                   type: "array",
                   items: {
                     type: "object",
                     properties: {
-                      type: { type: "string", enum: ["activity", "food", "travel", "stay"] },
+                      type: {
+                        type: "string",
+                        enum: ["activity", "food", "travel", "stay"],
+                      },
                       icon: { type: "string" },
-                      time: { type: "string", description: "24h format e.g. 14:00" },
+                      time: {
+                        type: "string",
+                        description: "24h format e.g. '14:00'. Must always be present.",
+                      },
                       duration: { type: "string" },
                       title: { type: "string" },
                       details: { type: "string" },
-                      provider: { type: "string", description: "REAL NAME of place/airline/hotel" },
+                      provider: {
+                        type: "string",
+                        description:
+                          "REAL NAME of place/airline/hotel/tour operator. Never generic.",
+                      },
                       approxPrice: { type: "number" },
                     },
                     required: ["type", "title", "details", "provider"],
@@ -419,45 +445,126 @@ const tools = [
 // --- 6. SYSTEM PROMPT -------------------------------------------------------
 
 const getSystemPrompt = (profile) => `
-You are an elite AI TRAVEL ARCHITECT. Your goal is to build **realistic, bookable, and rich** itineraries.
+You are an elite AI TRAVEL ARCHITECT inside a mobile app.
+
+You CAN see and interpret images. When the user sends a photo:
+- Carefully analyze the scene (architecture, landscape, language on signs, style).
+- Infer likely location(s) and type of place (city, beach resort, mountain village, etc.).
+- NEVER say "I can't identify locations from images" or "I can't see images".
+- If uncertain, say things like "This looks similar to Santorini or another Greek island" and ask which they prefer.
+- Treat a user’s image as a strong signal they want a trip inspired by that scene.
 
 PROFILE CONTEXT:
-- Origin: ${profile.origin_city || "Unknown (Ask user)"}
+- Origin city: ${profile.origin_city || "Unknown (you MUST ask 'Where are you flying from?')"}
+- Nationality: ${profile.nationality || "Unknown"}
 - Travel Style: ${profile.preferred_travel_type.join(", ") || "Any"}
 - Budget: ${profile.budget.prefer_comfort_or_saving}
-- Dates/Guests: You MUST use tools \`request_dates\` and \`request_guests\` to get these.
+- Existing multi-city intent: ${profile.multi_cities.join(" → ") || "none"}
 
---- YOUR PROCESS (STRICT) ---
+=====================================
+DISCOVERY PHASE (MANDATORY QUESTIONS)
+=====================================
+As soon as the user shows travel intent (mentions a destination, sends a travel photo, or says "plan a trip"):
 
-1. **DISCOVERY**: Ask short questions to find Destination, Dates, and Guests.
-   - DO NOT plan anything until you have Dates and Guest count.
-   - Use \`request_dates\` and \`request_guests\` immediately when context allows.
+1. If origin city is unknown:
+   - Ask: "Where are you flying from?"
+2. Always clarify:
+   - Budget: "Do you prefer saving money, comfort, or something balanced?"
+   - Travel style: "What kind of trip vibe: beach, active, urban, relaxing, nightlife, or culture?"
+   - With whom: "Are you going solo, with a partner, with friends, or with family?"
 
-2. **RESEARCH (MANDATORY)**:
-   - Once you have the basic details, you MUST search for REAL availability.
-   - **FLIGHTS**: Call \`search_google\` with "__flights__ [Origin] to [Dest] [Dates]".
-   - **HOTELS**: Call \`search_google\` with "__hotels__ [Dest] [Dates]".
-   - **ACTIVITIES**: Call \`search_google\` with "__activities__ [Dest]" and "__restaurants__ [Dest]".
+Keep questions short, in **WhatsApp-style** responses (1–3 short sentences).
 
-3. **PLANNING (RICH & REAL)**:
-   - When calling \`create_plan\`, the data MUST be real.
-   - **NO GENERIC PLACEHOLDERS**: Never say "Local Restaurant" or "Nice Hotel". Use the specific names found in your search (e.g., "Hotel Ristorante Roma", "Lufthansa LH404").
-   - **REAL PRICES**: Use the prices found in search to calculate the \`price\` field.
-   - **FLIGHTS**: Fill the \`flights\` array with specific options found (Airline, Flight Number, Price).
-   - **ITINERARY**: Every event must have a specific \`provider\` (name of place) and a realistic \`time\`.
+=====================================
+DATES & GUESTS: ALWAYS TOOL, NEVER TEXT
+=====================================
+- You are FORBIDDEN from asking dates or number of travelers in plain text.
+- As soon as:
+  - destination is reasonably clear (from text, image, or link), AND
+  - the user shows planning intent (e.g., "I want to go there", "plan something like this")
+- You MUST:
+  1. Call \`request_dates\` immediately.
+  2. After that, call \`request_guests\` in a later turn (never via text questions).
 
-4. **CLOSING**:
-   - Do not chat endlessly. Once you have searched Flights/Hotels/Activities, generate the plan immediately.
+NEVER write sentences like:
+- "When do you want to travel?"
+- "What dates are you thinking?"
+- "How many people are going?"
 
---- RULES ---
-- **One tool per message**: Do not call multiple tools at once.
-- **Short Chat**: Keep your text responses to the user brief (WhatsApp style). The richness goes into the JSON plan.
-- **Currency**: Assume USD unless specified.
-- **Dates**: In the JSON, always use ISO format "YYYY-MM-DD".
+The UI will handle these through tools only.
 
---- CRITICAL ---
-If you have the destination, dates, and guests, do NOT ask "Shall I create the plan?". JUST CREATE IT.
-Start by searching for flights and hotels, then compile.
+=====================================
+REAL-WORLD RESEARCH (MANDATORY)
+=====================================
+When you have:
+- clear destination (or your best inferred guess), AND
+- travel intent, AND
+- dates + guests (from tools),
+
+You MUST:
+- Call \`search_google\` with:
+  - "__flights__ ORIGIN to DESTINATION [dates]"
+  - "__hotels__ DESTINATION [dates]"
+  - "__restaurants__ DESTINATION"
+  - "__activities__ DESTINATION"
+
+Your goal:
+- Use **real flights** from search results:
+  - Airlines, flight numbers, realistic prices.
+  - Include airports by real IATA codes (e.g., HEL, CDG, JFK).
+- Use **real hotels**:
+  - Real property names, approximate nightly rates, and ratings.
+- Use **real restaurants and activities**:
+  - Real venue/tour names, taken from search results.
+
+=====================================
+ITINERARY & create_plan
+=====================================
+When you call \`create_plan\`:
+
+- \`itinerary[*].date\` and \`itinerary[*].day\`:
+  - MUST be ISO-like "YYYY-MM-DD". The backend will display them as "Nov 20".
+
+- Every event:
+  - MUST have a specific, realistic time in 24h format (e.g., "09:00", "14:30", "19:30").
+  - MUST have a \`provider\` field with a REAL entity name (hotel, restaurant, airline, tour operator).
+  - MUST NOT be generic like "Nice restaurant", "Local hotel", "Beach time".
+  - Use names from SerpAPI search results wherever possible.
+
+- Flights in \`flights\`:
+  - Use airline name, flight number, and realistic departure/arrival times and approximate price.
+  - Derive from \`search_google("__flights__ ...")\` results.
+
+- Hotels:
+  - Use hotel names from \`__hotels__\` results.
+  - Example: "Mövenpick Hotel Amsterdam City Centre (4★)".
+
+- Restaurants / Food:
+  - Use restaurant names from \`__restaurants__\` results.
+
+- Activities:
+  - Use attraction or tour names from \`__activities__\` results or your best known real-world names.
+
+=====================================
+CHAT STYLE
+=====================================
+- Messages must be short and conversational.
+- Do NOT dump long essays.
+- Think: **WhatsApp message**, not blog post.
+- When ready, just say something like: "Great, I'll build a plan for you now." and then call \`create_plan\`.
+
+=====================================
+TOOLS AND ORDER (ONE TOOL PER MESSAGE)
+=====================================
+- You must call AT MOST one tool in each assistant message.
+- Sequence:
+  1. Clarify origin + preferences (budget, style, with whom).
+  2. Call \`request_dates\`.
+  3. Call \`request_guests\`.
+  4. Call \`search_google\` multiple times (in separate turns) for flights, hotels, restaurants, activities.
+  5. Call \`create_plan\` once, when you have enough info.
+
+Never say "I can't do X because I don't have browsing" — you DO have a search tool, also create more than 2 iterinaries for each day.
 `;
 
 // --- 7. NORMALIZE MESSAGES --------------------------------------------------
@@ -474,11 +581,12 @@ function normalizeMessages(messages = []) {
         };
       }
       if (m.role === "user" && Array.isArray(m.content)) {
+        // vision: text + image_url array is passed as-is
         return { role: "user", content: m.content };
       }
       let role = m.role;
       if (role === "ai") role = "assistant";
-      if (role === "plan") role = "assistant"; 
+      if (role === "plan") role = "assistant";
 
       let content = m.content || m.text || "";
       if (role === "assistant" && m.payload) {
@@ -513,11 +621,12 @@ router.post("/travel", async (req, res) => {
       if (depth > 7) {
         logInfo(reqId, "Forcing plan creation due to depth");
         conversation.push({
-            role: "system",
-            content: "SYSTEM INTERVENTION: You have gathered enough information. Stop asking questions. Use the data you have found (or make reasonable real-world estimates) and call the 'create_plan' tool IMMEDIATELY."
+          role: "system",
+          content:
+            "SYSTEM INTERVENTION: You have gathered enough information. Stop asking questions. Use the data you have found (or make reasonable real-world estimates) and call the 'create_plan' tool IMMEDIATELY.",
         });
       } else if (depth > 9) {
-          return { aiText: "I'm having trouble finalizing. Let's start fresh." };
+        return { aiText: "I'm having trouble finalizing. Let's start fresh." };
       }
 
       let completion;
@@ -537,112 +646,199 @@ router.post("/travel", async (req, res) => {
       const msg = completion.choices[0]?.message;
       if (!msg) return { aiText: "No response." };
 
-      // --- TOOL CALL HANDLING (CRITICAL FIX) ---
+      // --- TOOL CALL HANDLING (STRICT SINGLE TOOL) ---
       if (msg.tool_calls?.length) {
-        // OpenAI sometimes ignores instructions and calls 3 tools at once (e.g. search, dates, plan).
-        // If we just process [0] and send the original 'msg' back to history, OpenAI crashes 
-        // saying "You didn't reply to tool_calls[1] and [2]".
-        // FIX: We create a "Sanitized" version of the message containing ONLY the tool we act on.
-        
-        const toolCall = msg.tool_calls[0]; // We only process the first one
+        // Strict: only process the first tool_call, and sanitize message to contain only that one
+        const toolCall = msg.tool_calls[0];
         const toolName = toolCall.function.name;
         let args = {};
-        try { args = JSON.parse(toolCall.function.arguments || "{}"); } catch (e) {}
+        try {
+          args = JSON.parse(toolCall.function.arguments || "{}");
+        } catch (e) {
+          logError(reqId, "[Tool args parse error]", e);
+        }
 
         logInfo(reqId, `[Tool] ${toolName}`, args);
 
-        // 1. Sanitize History: Create a copy of message that ONLY has this specific tool call
         const assistantMsgSanitized = {
-            ...msg,
-            tool_calls: [toolCall] 
+          ...msg,
+          tool_calls: [toolCall],
         };
         const newHistory = [...conversation, assistantMsgSanitized];
 
-        // 2. Execute Logic
-        // A. SEARCH -> RECURSE
+        // A. SEARCH -> recurse
         if (toolName === "search_google") {
-            const result = await performGoogleSearch(args.query, reqId);
-            newHistory.push({
-                role: "tool",
-                tool_call_id: toolCall.id,
-                content: result
-            });
-            return runConversation(newHistory, depth + 1);
+          const result = await performGoogleSearch(args.query, reqId);
+          newHistory.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: result,
+          });
+          return runConversation(newHistory, depth + 1);
         }
 
-        // B. UI ACTIONS -> RETURN TO FRONTEND (EXIT LOOP)
+        // B. DATES / GUESTS -> return signal to frontend
         if (toolName === "request_dates") {
-          return { 
-              aiText: "When are you planning to go?", 
-              signal: { type: "dateNeeded" }, 
-              assistantMessage: assistantMsgSanitized 
-          };
-        }
-        if (toolName === "request_guests") {
-          return { 
-              aiText: "How many people?", 
-              signal: { type: "guestsNeeded" }, 
-              assistantMessage: assistantMsgSanitized 
+          return {
+            aiText: "Choose your travel dates.",
+            signal: { type: "dateNeeded" },
+            assistantMessage: assistantMsgSanitized,
           };
         }
 
-        // C. CREATE PLAN -> RETURN TO FRONTEND (EXIT LOOP)
+        if (toolName === "request_guests") {
+          return {
+            aiText: "Select how many people are traveling.",
+            signal: { type: "guestsNeeded" },
+            assistantMessage: assistantMsgSanitized,
+          };
+        }
+
+        // C. CREATE PLAN -> finalize and return
         if (toolName === "create_plan") {
           const plan = { ...args };
-          
-          // Data Cleanup
+
           if (!plan.itinerary) plan.itinerary = [];
           if (!plan.flights) plan.flights = [];
           if (!plan.costBreakdown) plan.costBreakdown = [];
           if (!plan.currency) plan.currency = "USD";
-          
+
           if (!plan.cities) plan.cities = [];
           if (plan.cities.length > 1) plan.multiCity = true;
 
-          // Image
+          // Attach image
           try {
-             const q = plan.multiCity ? plan.cities[0] : plan.location;
-             plan.image = await pickPhoto(q, reqId);
-          } catch(e) { plan.image = FALLBACK_IMAGE_URL; }
+            const q = plan.multiCity && plan.cities.length > 0
+              ? plan.cities[0]
+              : plan.location;
+            plan.image = await pickPhoto(q || "travel", reqId);
+          } catch (e) {
+            plan.image = FALLBACK_IMAGE_URL;
+          }
 
-          // Format Dates
-          plan.itinerary.forEach(day => {
-             day.events.forEach(e => {
-                 if(e.provider === "Local Restaurant") e.provider = "Recommended Local Spot";
-             });
-             if(day.date) {
-                 const nice = formatDateToMMMDD(day.date);
-                 day.date = nice;
-                 day.day = nice; 
-             }
+          // Format itinerary dates to "Nov 20" for frontend
+          plan.itinerary.forEach((day) => {
+            if (day.date) {
+              const nice = formatDateToMMMDD(day.date);
+              day.date = nice;
+              day.day = nice;
+            } else if (day.day) {
+              const nice = formatDateToMMMDD(day.day);
+              day.date = nice;
+              day.day = nice;
+            }
+
+            if (Array.isArray(day.events)) {
+              const defaultSlots = ["09:00", "13:00", "17:00", "20:00"];
+              day.events.forEach((ev, idx) => {
+                if (!ev.time || typeof ev.time !== "string" || !ev.time.trim()) {
+                  ev.time = defaultSlots[idx] || "10:00";
+                }
+                if (
+                  !ev.duration ||
+                  typeof ev.duration !== "string" ||
+                  !ev.duration.trim()
+                ) {
+                  ev.duration = "2h";
+                }
+
+                const t = String(ev.title || "").toLowerCase();
+                const d = String(ev.details || "").toLowerCase();
+                const p = String(ev.provider || "").toLowerCase();
+
+                const generic =
+                  t.includes("local restaurant") ||
+                  t.includes("nice restaurant") ||
+                  t.includes("hotel") && !t.includes("★") &&
+                    !t.includes("resort") &&
+                    !t.includes("inn") &&
+                    !t.includes("hotel ") &&
+                    !/[a-z]{3,}/.test(t.replace("hotel", "")) ||
+                  t.includes("beach time") ||
+                  t.includes("explore the city") ||
+                  t.includes("generic") ||
+                  p === "local restaurant" ||
+                  p === "nice hotel" ||
+                  p === "local hotel";
+
+                if (generic) {
+                  ev.title =
+                    "INVALID_GENERIC_EVENT — PLEASE REGENERATE WITH REAL PLACE NAMES";
+                }
+              });
+            }
           });
 
-          // Cost Breakdown Fallback
+          // Cost Breakdown fallback: if empty and we have flights
           if (plan.costBreakdown.length === 0 && plan.flights.length > 0) {
-              plan.costBreakdown.push({
-                  item: "Flights",
-                  provider: plan.flights[0].airline,
-                  price: plan.flights[0].price || 0,
-                  iconType: "plane",
-                  details: "Round trip"
-              });
+            const f0 = plan.flights[0];
+            plan.costBreakdown.push({
+              item: "Flights",
+              provider: f0.airline || "Airline",
+              details: f0.route || "Round trip",
+              price: f0.price || 0,
+              iconType: "plane",
+              iconValue: "✈️",
+            });
           }
 
           return {
             aiText: `I've built a plan for ${plan.location}.`,
             signal: { type: "planReady", payload: plan },
-            assistantMessage: assistantMsgSanitized
+            assistantMessage: assistantMsgSanitized,
           };
         }
       }
 
-      // No tool calls -> Standard text response
-      return { aiText: msg.content || "" };
+      // No tool calls -> Standard text response (also guard against manual date questions)
+      let text = msg.content || "";
+
+      // Guardrail: if the model mistakenly asks about dates/guests via text, convert to tool signals instead
+      const lower = (text || "").toLowerCase();
+      const mentionsDates =
+        lower.includes("what dates") ||
+        lower.includes("when do you want") ||
+        lower.includes("when are you planning") ||
+        lower.includes("when would you like to travel");
+      const mentionsGuests =
+        lower.includes("how many people") ||
+        lower.includes("how many guests") ||
+        lower.includes("who is traveling") && lower.includes("people");
+
+      if (mentionsDates) {
+        logInfo(
+          reqId,
+          "[Guardrail] Intercepted text question about dates. Returning dateNeeded signal instead."
+        );
+        return {
+          aiText: "Choose your travel dates.",
+          signal: { type: "dateNeeded" },
+          assistantMessage: msg,
+        };
+      }
+
+      if (mentionsGuests) {
+        logInfo(
+          reqId,
+          "[Guardrail] Intercepted text question about guests. Returning guestsNeeded signal instead."
+        );
+        return {
+          aiText: "Select how many people are traveling.",
+          signal: { type: "guestsNeeded" },
+          assistantMessage: msg,
+        };
+      }
+
+      // Anti-dump: shorten overly long messages
+      if (typeof text === "string" && text.length > 600) {
+        text = text.slice(0, 580) + "…";
+      }
+
+      return { aiText: text };
     };
 
     const response = await runConversation(baseHistory);
     return res.json(response);
-
   } catch (err) {
     logError(reqId, "Route Error", err);
     return res.status(500).json({ aiText: "Server error." });
