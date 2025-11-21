@@ -75,8 +75,9 @@ function getMem(userId) {
 
 // --- 3. HELPERS -------------------------------------------------------------
 
+// Neutral fallback (no “2025” / fixed width baked in)
 const FALLBACK_IMAGE_URL =
-  "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?q=80&w=1442&auto=format&fit=crop";
+  "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&q=80";
 
 async function pickPhoto(dest, reqId) {
   const key = (dest || "").toLowerCase().trim();
@@ -209,7 +210,7 @@ function updateProfileFromHistory(messages, mem) {
   if (cities.length > 1) profile.multi_cities = cities;
 }
 
-// Date formatting for itinerary: "NOV 3"
+// Date formatting → "DEC 10"
 function formatDateToMMMDD(dateStr) {
   if (!dateStr) return dateStr;
   const d = new Date(dateStr);
@@ -218,7 +219,7 @@ function formatDateToMMMDD(dateStr) {
   return `${month} ${d.getDate()}`;
 }
 
-// --- 4. SERPAPI SEARCH LAYER (HYBRID: 3 calls per city) ---------------------
+// --- 4. SERPAPI SEARCH LAYER -----------------------------------------------
 
 async function performGoogleSearch(rawQuery, reqId) {
   if (!SERPAPI_KEY) {
@@ -407,7 +408,6 @@ const tools = [
       parameters: {
         type: "object",
         properties: {
-          // compatibility with your existing frontend shape:
           location: { type: "string" },
           country: { type: "string" },
           dateRange: { type: "string" },
@@ -427,8 +427,16 @@ const tools = [
             items: {
               type: "object",
               properties: {
-                date: { type: "string" },
-                day: { type: "string" },
+                date: {
+                  type: "string",
+                  description:
+                    "Trip date in ISO-like format (e.g. '2025-12-10'). Backend will convert and display as 'DEC 10'. Do NOT write weekday names here.",
+                },
+                day: {
+                  type: "string",
+                  description:
+                    "Short label for the day. Use the same date-like value as 'date' (e.g. '2025-12-10'); server will format it as 'DEC 10'. Do NOT use 'Monday' / 'December 10'.",
+                },
                 events: {
                   type: "array",
                   items: {
@@ -439,11 +447,23 @@ const tools = [
                         enum: ["activity", "food", "travel", "stay"],
                       },
                       icon: { type: "string" },
-                      time: { type: "string" },
-                      duration: { type: "string" },
+                      time: {
+                        type: "string",
+                        description:
+                          "Local start time in 24h format like '09:00', '13:30', etc. Every event MUST have a realistic time.",
+                      },
+                      duration: {
+                        type: "string",
+                        description:
+                          "Approximate duration like '2h', '3.5h', 'All day'.",
+                      },
                       title: { type: "string" },
                       details: { type: "string" },
-                      provider: { type: "string" },
+                      provider: {
+                        type: "string",
+                        description:
+                          "Real-world place or company name (hotel, restaurant, tour, airline). NO generic placeholders.",
+                      },
                       approxPrice: { type: "number" },
                     },
                     required: ["type", "title", "details"],
@@ -469,7 +489,6 @@ const tools = [
             },
           },
 
-          // Extra optional fields for richer logic, ignored safely by current frontend
           multiCity: { type: "boolean" },
           cities: {
             type: "array",
@@ -536,80 +555,93 @@ Known user profile:
 - Liked activities: ${profile.liked_activities.join(", ") || "unknown"}
 - Multi-city intent: ${profile.multi_cities.join(" → ") || "none"}
 
-BEHAVIOR:
+CONVERSATION STYLE (VERY IMPORTANT):
+- Think in **WhatsApp-sized messages**.
+- Do NOT dump huge walls of text. Prefer 1–3 short paragraphs max, or a few bullet points.
+- Ask **one follow-up question at a time**.
+- Only when finalizing a plan (via \`create_plan\`) should you pack lots of detail into the structured JSON.
+- The app itself will show the full plan UI; you only need to verbally summarize key points.
 
-1. **ASK FOR PREFERENCES (BUT NOT DATES/GUESTS BY TEXT)**  
-   If missing, ask short, crisp questions like:
-   - "Where are you flying from?"
-   - "Do you prefer beach, active, urban or relaxing trips?"
-   - "Solo, with family, or with friends?"
-   - "More important for flights: price, comfort or duration?"
-   - "Hotel, apartment, villa or hostel?"
-   - "Sea view, mountains, city view, or doesn't matter?"
-   - "Comfort, saving or balanced budget?"
-   - "What kind of vibe: fun, relaxation, photography, luxury, local culture?"
-   - "Any activities you love? (hiking, museums, shopping, wine tasting, extreme sports...)"
+DATES & GUESTS (TOOL USAGE IS MANDATORY):
+- NEVER ask for dates in plain text. Always call \`request_dates\`.
+- NEVER ask for guest counts in plain text. Always call \`request_guests\`.
+- As soon as you have a clear idea of the destination and rough trip idea, **trigger \`request_dates\` and \`request_guests\`** before finalizing anything.
 
-   NEVER ask "what dates" or "how many guests" as plain text.
-   For dates: call \`request_dates\`.  
-   For guests: call \`request_guests\`.
+PREFERENCES:
+If missing, ask short, crisp questions like:
+- "Where are you flying from?"
+- "Do you prefer beach, active, urban or relaxing trips?"
+- "Solo, with family, or with friends?"
+- "More important for flights: price, comfort or duration?"
+- "Hotel, apartment, villa or hostel?"
+- "Sea view, mountains, city view, or doesn't matter?"
+- "Comfort, saving or balanced budget?"
+- "What kind of vibe: fun, relaxation, photography, luxury, local culture?"
+- "Any activities you love? (hiking, museums, shopping, wine tasting, extreme sports...)"
 
-2. **SOCIAL LINKS (YouTube/TikTok/Instagram/etc)**  
-   If the user shares a link, do NOT say "I can't open links".
-   Instead:
-   - Call \`search_google\` with the link as the query.
-   - Use video_results/local_results/organic_results to infer:
-     - Location (city/country),
-     - Type of place (beach club, hike, café, etc.),
-     - Approximate vibe & cost.
-   - Suggest a trip inspired by that content.
+SOCIAL LINKS (YouTube/TikTok/Instagram/etc):
+- If the user shares a link, do NOT say "I can't open links".
+- Call \`search_google\` with the link as the query.
+- Use video_results/local_results/organic_results to infer:
+  - Location (city/country),
+  - Type of place (beach club, hike, café, etc.),
+  - Approximate vibe & cost.
+- Suggest a trip inspired by that content.
 
-3. **REAL ITINERARY CONTENT**  
-   For the main destination or each city in a multi-city trip:
-   - Call \`search_google\` with markers:
-     - "__restaurants__ CITY"
-     - "__hotels__ CITY"
-     - "__activities__ CITY"
-   - Use those JSON search results to fill \`itinerary.events\` with **real places**:
-     - Real names for restaurants, attractions, hotels.
-     - Use \`provider\` / \`approxPrice\` where possible.
-   - Structure events by time (morning/afternoon/evening) but you can be flexible.
+REAL, GROUNDED ITINERARIES (NO GENERIC FILLER):
+For the main destination or each city in a multi-city trip:
+- Call \`search_google\` with markers:
+  - "__restaurants__ CITY"
+  - "__hotels__ CITY"
+  - "__activities__ CITY"
+- Use those JSON search results to fill \`itinerary.events\` with **real places**:
+  - Real names for restaurants, attractions, hotels (put these in \`provider\` and/or \`title\`).
+  - Use \`approxPrice\` where possible.
+- **Never** invent placeholder names like "Nice Hotel", "Popular Restaurant", "City Walking Tour".
+- Every event should:
+  - Have a realistic **time** in 24h format, e.g. "09:00", "14:30", "19:30".
+  - Have a **duration**, e.g. "2h", "3.5h", "All day".
+  - Be ordered in chronological order within the day (morning → afternoon → evening).
 
-4. **FLIGHT PRICES & CHEAPER DATES**  
-   If origin & destination are known:
-   - Before or during date picking:
-     - Call \`search_google\` with "__cheap_flights__ ORIGIN to DESTINATION"
-       to see if certain months are cheaper.
-     - Briefly mention cheaper periods if found.
-   - When dates and routes are known:
-     - Call \`search_google\` with "__flights__ ORIGIN to DESTINATION <date info>"
-       and turn the results into realistic flight options in \`flights\` + \`costBreakdown\`.
+ITINERARY DATES & DAY LABELS:
+- When you call \`create_plan\`, set \`itinerary[i].date\` and \`itinerary[i].day\` both to **ISO-like dates** like "2025-12-10".
+- The server will convert these to "DEC 10" for display.
+- Do **NOT** put weekday names like "Monday", and do **NOT** write "December 10".
+- All human-facing day formatting will be handled by the backend (format "DEC 10").
 
-5. **VISA REQUIREMENTS**  
-   If nationality and destination country are known:
-   - Call \`search_google\` with "__visa__ <nationality> to <country>".
-   - Summarize in about 1–3 sentences and put it into \`visa\` and/or \`description\`.
-   - Make it clear it's not legal advice, just an overview.
+FLIGHTS & CHEAPER DATES:
+If origin & destination are known:
+- Before or during date picking:
+  - Call \`search_google\` with "__cheap_flights__ ORIGIN to DESTINATION"
+  - Mention cheaper periods briefly if found.
+- When dates and routes are known:
+  - Call \`search_google\` with "__flights__ ORIGIN to DESTINATION <date info>"
+  - Turn the results into realistic flight options in \`flights\` + \`costBreakdown\`.
 
-6. **WEATHER & ALTERNATIVE DESTINATIONS**  
-   If dates/destination are known or strongly implied:
-   - Call \`search_google\` with "__weather__ <city> in <month or season>".
-   - If weather is very bad or extreme, propose 1–2 alternative destinations
-     with better conditions and add them under \`alternatives\`.
+VISA REQUIREMENTS:
+If nationality and destination country are known:
+- Call \`search_google\` with "__visa__ <nationality> to <country>".
+- Summarize in about 1–3 sentences and put it into \`visa\` and/or \`description\`.
+- Make it clear it's not legal advice, just an overview.
 
-7. **MULTI-CITY TRIPS**  
-   If the user mentions multiple cities (e.g., "Paris, Rome and Athens"):
-   - Treat as a multi-city trip (\`multiCity = true\`).
-   - Fill \`cities\` in \`create_plan\`.
-   - For each city, include at least one day in \`itinerary\` with:
-     - city name in \`day\` label or event titles,
-     - real hotel and activities,
-     - travel events between cities if appropriate.
+WEATHER & ALTERNATIVES:
+If dates/destination are known or strongly implied:
+- Call \`search_google\` with "__weather__ <city> in <month or season>".
+- If weather is very bad or extreme, propose 1–2 alternative destinations with better conditions and add them under \`alternatives\`.
 
-8. **create_plan USAGE**  
-   - Only call \`create_plan\` once you have enough info for a realistic plan.
-   - Make sure \`itinerary\` has dates in ISO-like format (e.g. "2025-11-03"), the backend will format to "NOV 3" for the app.
-   - Use real names, not placeholders like "Nice hotel".
+MULTI-CITY TRIPS:
+If the user mentions multiple cities (e.g., "Paris, Rome and Athens"):
+- Treat as a multi-city trip (\`multiCity = true\`).
+- Fill \`cities\` in \`create_plan\`.
+- For each city, include at least one day in \`itinerary\` with:
+  - city name in \`day\` label or event titles,
+  - real hotel and activities,
+  - travel events between cities if appropriate.
+
+USING \`create_plan\`:
+- Only call \`create_plan\` once you have enough info for a realistic plan.
+- Make sure \`itinerary\` uses ISO-like dates ("2025-12-10") for both \`date\` and \`day\`; backend will format to "DEC 10".
+- Use real names from \`search_google\`, not placeholders.
 `;
 
 // --- 7. NORMALIZE MESSAGES FOR OPENAI ---------------------------------------
@@ -716,7 +748,6 @@ router.post("/travel", async (req, res) => {
               tool_call_id: toolCall.id,
               content: toolResult,
             });
-            // continue loop: there might be multiple search_google calls
             continue;
           }
 
@@ -748,7 +779,10 @@ router.post("/travel", async (req, res) => {
                 : Array.isArray(planArgs.cities) && planArgs.cities.length > 1;
 
             if (!Array.isArray(planArgs.cities) || planArgs.cities.length === 0) {
-              if (Array.isArray(mem.profile.multi_cities) && mem.profile.multi_cities.length > 1) {
+              if (
+                Array.isArray(mem.profile.multi_cities) &&
+                mem.profile.multi_cities.length > 1
+              ) {
                 planArgs.cities = mem.profile.multi_cities;
                 planArgs.multiCity = true;
               } else {
@@ -771,9 +805,36 @@ router.post("/travel", async (req, res) => {
               planArgs.currency = "USD";
             }
 
-            // Format itinerary dates: "NOV 3"
+            // Ensure times & durations exist and normalize date/day → "DEC 10"
             for (const day of planArgs.itinerary) {
-              if (day.date) day.date = formatDateToMMMDD(day.date);
+              // Normalize original date/day to display format
+              if (day.date) {
+                const formatted = formatDateToMMMDD(day.date);
+                day.date = formatted;
+                day.day = formatted; // keep `day` in "DEC 10" format too
+              } else if (day.day) {
+                // fallback: try to format whatever is in `day`
+                day.day = formatDateToMMMDD(day.day);
+                day.date = day.day;
+              }
+
+              if (Array.isArray(day.events)) {
+                // Very simple, deterministic fallback schedule if missing times:
+                // 1st event: 09:00, 2nd: 13:00, 3rd: 18:00, others stay as-is.
+                const defaultSlots = ["09:00", "13:00", "18:00", "21:00"];
+                day.events.forEach((ev, idx) => {
+                  if (!ev.time || typeof ev.time !== "string" || !ev.time.trim()) {
+                    ev.time = defaultSlots[idx] || "10:00";
+                  }
+                  if (
+                    !ev.duration ||
+                    typeof ev.duration !== "string" ||
+                    !ev.duration.trim()
+                  ) {
+                    ev.duration = "2h";
+                  }
+                });
+              }
             }
 
             // Attach image
@@ -809,8 +870,6 @@ router.post("/travel", async (req, res) => {
 
           // Unknown tool (shouldn't happen)
           logError(reqId, "[Unknown tool]", toolName);
-          // we don't push tool result because we can't fabricate content;
-          // but we also won't call OpenAI again with missing tool responses.
           return {
             aiText: "I tried to use a tool I don't recognize.",
           };
