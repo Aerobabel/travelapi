@@ -13,6 +13,7 @@ process.on("unhandledRejection", (reason) => {
 let FETCH_SOURCE = "native";
 try {
   if (typeof globalThis.fetch !== "function") {
+    // ESM top-level await is allowed
     const nodeFetch = (await import("node-fetch")).default;
     globalThis.fetch = nodeFetch;
     FETCH_SOURCE = "node-fetch";
@@ -21,7 +22,6 @@ try {
   console.error("[chat] fetch polyfill error:", e?.message);
 }
 
-// --- 1. BASIC SETUP ---------------------------------------------------------
 const router = Router();
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -34,7 +34,7 @@ const newReqId = () =>
 const logInfo = (id, ...args) => console.log(`[chat][${id}]`, ...args);
 const logError = (id, ...args) => console.error(`[chat][${id}]`, ...args);
 
-// --- 2. IN-MEMORY PROFILE/MEMORY -------------------------------------------
+// --- 1. IN-MEMORY PROFILE/MEMORY -------------------------------------------
 const userMem = new Map();
 const imageCache = new Map();
 
@@ -72,7 +72,7 @@ function getMem(userId) {
   return userMem.get(userId);
 }
 
-// --- 3. HELPERS -------------------------------------------------------------
+// --- 2. HELPERS -------------------------------------------------------------
 
 const FALLBACK_IMAGE_URL =
   "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&q=80";
@@ -139,10 +139,12 @@ function updateProfileFromHistory(messages, mem) {
   ["solo", "family", "friends"].forEach((t) => {
     if (lower.includes(t)) profile.travel_alone_or_with = t;
   });
-  ["fun", "relaxation", "photography", "luxury", "local culture"].forEach((t) => {
-    if (lower.includes(t) && !profile.desired_experience.includes(t))
-      profile.desired_experience.push(t);
-  });
+  ["fun", "relaxation", "photography", "luxury", "local culture"].forEach(
+    (t) => {
+      if (lower.includes(t) && !profile.desired_experience.includes(t))
+        profile.desired_experience.push(t);
+    }
+  );
   ["economy", "premium economy", "business", "first"].forEach((cls) => {
     if (lower.includes(cls)) profile.flight_preferences.class = cls;
   });
@@ -173,7 +175,21 @@ function formatDateToMMMDD(dateStr) {
   return `${month} ${day}`;
 }
 
-// --- 4. SERPAPI SEARCH LAYER -----------------------------------------------
+// Simple weather filler so frontend always has something to show
+function ensureWeather(plan) {
+  if (!plan.weather || typeof plan.weather !== "object") {
+    plan.weather = { temp: 24, icon: "☀️" };
+    return;
+  }
+  if (typeof plan.weather.temp !== "number") {
+    plan.weather.temp = 24;
+  }
+  if (!plan.weather.icon || typeof plan.weather.icon !== "string") {
+    plan.weather.icon = "☀️";
+  }
+}
+
+// --- 3. SERPAPI SEARCH LAYER -----------------------------------------------
 
 async function performGoogleSearch(rawQuery, reqId) {
   if (!SERPAPI_KEY) {
@@ -236,17 +252,22 @@ async function performGoogleSearch(rawQuery, reqId) {
         const leg = (f.flights && f.flights[0]) || {};
         const dep = leg.departure_airport || {};
         const arr = leg.arrival_airport || {};
+        const depCode = dep.code || dep.airport_code || "";
+        const arrCode = arr.code || arr.airport_code || "";
+        const route = depCode && arrCode ? `${depCode} → ${arrCode}` : "";
+
         return {
           airline: leg.airline,
           flight_number: leg.flight_number,
           departure_time: dep.time,
           arrival_time: arr.time,
-          departure_airport_code: dep.code || dep.airport_code,
+          departure_airport_code: depCode,
           departure_airport_name: dep.name,
-          arrival_airport_code: arr.code || arr.airport_code,
+          arrival_airport_code: arrCode,
           arrival_airport_name: arr.name,
           duration: f.total_duration,
           price: f.price,
+          route,
         };
       });
 
@@ -293,7 +314,7 @@ async function performGoogleSearch(rawQuery, reqId) {
   }
 }
 
-// --- 5. TOOLS ---------------------------------------------------------------
+// --- 4. TOOLS ---------------------------------------------------------------
 
 const tools = [
   {
@@ -345,7 +366,10 @@ const tools = [
           price: { type: "number", description: "Total estimated cost" },
           weather: {
             type: "object",
-            properties: { temp: { type: "number" }, icon: { type: "string" } },
+            properties: {
+              temp: { type: "number" },
+              icon: { type: "string" },
+            },
           },
           itinerary: {
             type: "array",
@@ -358,7 +382,8 @@ const tools = [
                 },
                 day: {
                   type: "string",
-                  description: "ISO format '2025-11-20' (backend reformats to 'Nov 20')",
+                  description:
+                    "ISO format '2025-11-20' (backend reformats to 'Nov 20')",
                 },
                 events: {
                   type: "array",
@@ -372,7 +397,8 @@ const tools = [
                       icon: { type: "string" },
                       time: {
                         type: "string",
-                        description: "24h format e.g. '14:00'. Must always be present.",
+                        description:
+                          "24h format e.g. '14:00'. Must always be present.",
                       },
                       duration: { type: "string" },
                       title: { type: "string" },
@@ -442,7 +468,7 @@ const tools = [
   },
 ];
 
-// --- 6. SYSTEM PROMPT -------------------------------------------------------
+// --- 5. SYSTEM PROMPT -------------------------------------------------------
 
 const getSystemPrompt = (profile) => `
 You are an elite AI TRAVEL ARCHITECT inside a mobile app.
@@ -491,8 +517,6 @@ NEVER write sentences like:
 - "What dates are you thinking?"
 - "How many people are going?"
 
-The UI will handle these through tools only.
-
 =====================================
 REAL-WORLD RESEARCH (MANDATORY)
 =====================================
@@ -512,6 +536,14 @@ Your goal:
 - Use **real flights** from search results:
   - Airlines, flight numbers, realistic prices.
   - Include airports by real IATA codes (e.g., HEL, CDG, JFK).
+
+  >>> HARD RULE FOR FLIGHT WORDING <<<
+  - NEVER write vague phrases like "depart from Abuja to Moscow".
+  - ALWAYS anchor flights to specific airports and the airline/flight number.
+  - Use this pattern in titles and details:
+    - "Turkish Airlines TK624 from Nnamdi Azikiwe International Airport (ABV) in Abuja to Sheremetyevo International Airport (SVO) in Moscow".
+    - Short title example: "Flight ABV → SVO (Turkish Airlines TK624)".
+
 - Use **real hotels**:
   - Real property names, approximate nightly rates, and ratings.
 - Use **real restaurants and activities**:
@@ -529,7 +561,8 @@ When you call \`create_plan\`:
   - MUST have a specific, realistic time in 24h format (e.g., "09:00", "14:30", "19:30").
   - MUST have a \`provider\` field with a REAL entity name (hotel, restaurant, airline, tour operator).
   - MUST NOT be generic like "Nice restaurant", "Local hotel", "Beach time".
-  - Use names from SerpAPI search results wherever possible.
+  - For travel events, mention airport names + codes and airline:
+    - Example details: "Turkish Airlines TK624, Nnamdi Azikiwe International Airport (ABV) → Sheremetyevo International Airport (SVO)".
 
 - Flights in \`flights\`:
   - Use airline name, flight number, and realistic departure/arrival times and approximate price.
@@ -537,7 +570,6 @@ When you call \`create_plan\`:
 
 - Hotels:
   - Use hotel names from \`__hotels__\` results.
-  - Example: "Mövenpick Hotel Amsterdam City Centre (4★)".
 
 - Restaurants / Food:
   - Use restaurant names from \`__restaurants__\` results.
@@ -545,13 +577,33 @@ When you call \`create_plan\`:
 - Activities:
   - Use attraction or tour names from \`__activities__\` results or your best known real-world names.
 
+>>> HARD RULE: NO TEXT-ONLY FULL ITINERARIES <<<
+- You are FORBIDDEN from writing a full day-by-day itinerary in normal chat messages.
+- Do NOT send messages like:
+  - "Day 1: ... Day 2: ..." or big lists of activities per day.
+- All detailed "Day X / morning / afternoon / evening" content MUST be inside the \`itinerary\` array of the \`create_plan\` tool.
+- In normal chat, you may mention at most 2–3 highlight examples in ONE short sentence.
+
+>>> WHEN TO CALL create_plan <<<
+As soon as you have:
+- origin city
+- destination
+- dates & guests (from tools)
+- at least one realistic flight option
+- at least one realistic hotel option
+- a set of 4–8 good activities/places
+
+You MUST:
+- Stop explaining the trip in detail.
+- Say a very short message like: "Great, I'll build a plan for you now."
+- Immediately call \`create_plan\` and put ALL day-by-day details into the tool payload instead of the chat text.
+
 =====================================
 CHAT STYLE
 =====================================
-- Messages must be short and conversational.
+- Messages must be short and conversational (WhatsApp-style).
 - Do NOT dump long essays.
-- Think: **WhatsApp message**, not blog post.
-- When ready, just say something like: "Great, I'll build a plan for you now." and then call \`create_plan\`.
+- Never print long bullet lists of activities in normal chat when you could instead finalize a plan via \`create_plan\`.
 
 =====================================
 TOOLS AND ORDER (ONE TOOL PER MESSAGE)
@@ -564,10 +616,10 @@ TOOLS AND ORDER (ONE TOOL PER MESSAGE)
   4. Call \`search_google\` multiple times (in separate turns) for flights, hotels, restaurants, activities.
   5. Call \`create_plan\` once, when you have enough info.
 
-Never say "I can't do X because I don't have browsing" — you DO have a search tool, also create more than 2 iterinaries for each day.
+Never say "I can't do X because I don't have browsing" — you DO have a search tool, also create more than 2 itineraries for each day.
 `;
 
-// --- 7. NORMALIZE MESSAGES --------------------------------------------------
+// --- 6. NORMALIZE MESSAGES --------------------------------------------------
 
 function normalizeMessages(messages = []) {
   return messages
@@ -596,7 +648,7 @@ function normalizeMessages(messages = []) {
     });
 }
 
-// --- 8. MAIN ROUTE ----------------------------------------------------------
+// --- 7. MAIN ROUTE ----------------------------------------------------------
 
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
@@ -648,7 +700,6 @@ router.post("/travel", async (req, res) => {
 
       // --- TOOL CALL HANDLING (STRICT SINGLE TOOL) ---
       if (msg.tool_calls?.length) {
-        // Strict: only process the first tool_call, and sanitize message to contain only that one
         const toolCall = msg.tool_calls[0];
         const toolName = toolCall.function.name;
         let args = {};
@@ -702,15 +753,18 @@ router.post("/travel", async (req, res) => {
           if (!plan.flights) plan.flights = [];
           if (!plan.costBreakdown) plan.costBreakdown = [];
           if (!plan.currency) plan.currency = "USD";
-
           if (!plan.cities) plan.cities = [];
           if (plan.cities.length > 1) plan.multiCity = true;
 
+          // Ensure weather exists so frontend always has something
+          ensureWeather(plan);
+
           // Attach image
           try {
-            const q = plan.multiCity && plan.cities.length > 0
-              ? plan.cities[0]
-              : plan.location;
+            const q =
+              plan.multiCity && plan.cities.length > 0
+                ? plan.cities[0]
+                : plan.location;
             plan.image = await pickPhoto(q || "travel", reqId);
           } catch (e) {
             plan.image = FALLBACK_IMAGE_URL;
@@ -731,7 +785,11 @@ router.post("/travel", async (req, res) => {
             if (Array.isArray(day.events)) {
               const defaultSlots = ["09:00", "13:00", "17:00", "20:00"];
               day.events.forEach((ev, idx) => {
-                if (!ev.time || typeof ev.time !== "string" || !ev.time.trim()) {
+                if (
+                  !ev.time ||
+                  typeof ev.time !== "string" ||
+                  !ev.time.trim()
+                ) {
                   ev.time = defaultSlots[idx] || "10:00";
                 }
                 if (
@@ -743,17 +801,17 @@ router.post("/travel", async (req, res) => {
                 }
 
                 const t = String(ev.title || "").toLowerCase();
-                const d = String(ev.details || "").toLowerCase();
                 const p = String(ev.provider || "").toLowerCase();
 
                 const generic =
                   t.includes("local restaurant") ||
                   t.includes("nice restaurant") ||
-                  t.includes("hotel") && !t.includes("★") &&
+                  (t.includes("hotel") &&
+                    !t.includes("★") &&
                     !t.includes("resort") &&
                     !t.includes("inn") &&
                     !t.includes("hotel ") &&
-                    !/[a-z]{3,}/.test(t.replace("hotel", "")) ||
+                    !/[a-z]{3,}/.test(t.replace("hotel", ""))) ||
                   t.includes("beach time") ||
                   t.includes("explore the city") ||
                   t.includes("generic") ||
@@ -792,18 +850,45 @@ router.post("/travel", async (req, res) => {
 
       // No tool calls -> Standard text response (also guard against manual date questions)
       let text = msg.content || "";
+      const lower = (text || "").toLowerCase();
+
+      // If the model starts dumping an itinerary, intercept and push it to create_plan
+      const looksLikeItinerary =
+        lower.includes("day 1") ||
+        lower.includes("day one") ||
+        lower.includes("itinerary") ||
+        /day\s+\d+[:\-]/i.test(text || "");
+
+      if (looksLikeItinerary && depth < 7) {
+        logInfo(
+          reqId,
+          "[Guardrail] Intercepted text itinerary. Forcing model to use create_plan instead."
+        );
+
+        const newConversation = [
+          ...conversation,
+          msg,
+          {
+            role: "system",
+            content:
+              "SYSTEM REMINDER: Do NOT write day-by-day itineraries in plain text. You already have enough information. Now you MUST call the 'create_plan' tool and put all days/activities inside its 'itinerary' field. In the chat message, only say a short confirmation like 'Great, I'll build a plan for you now.'",
+          },
+        ];
+
+        return runConversation(newConversation, depth + 1);
+      }
 
       // Guardrail: if the model mistakenly asks about dates/guests via text, convert to tool signals instead
-      const lower = (text || "").toLowerCase();
       const mentionsDates =
         lower.includes("what dates") ||
         lower.includes("when do you want") ||
         lower.includes("when are you planning") ||
         lower.includes("when would you like to travel");
+
       const mentionsGuests =
         lower.includes("how many people") ||
         lower.includes("how many guests") ||
-        lower.includes("who is traveling") && lower.includes("people");
+        (lower.includes("who is traveling") && lower.includes("people"));
 
       if (mentionsDates) {
         logInfo(
