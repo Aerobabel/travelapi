@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// --- 0. GLOBAL SAFETY / FETCH POLYFILL --------------------------------------
+// --- 0. GLOBAL SAFETY & FETCH POLYFILL --------------------------------------
 process.on("unhandledRejection", (reason) => {
   console.error("[UNHANDLED PROMISE REJECTION]", reason);
 });
@@ -34,10 +34,7 @@ const newReqId = () =>
 const logInfo = (id, ...args) => console.log(`[chat][${id}]`, ...args);
 const logError = (id, ...args) => console.error(`[chat][${id}]`, ...args);
 
-// --- 2. IN-MEMORY USER PROFILE ----------------------------------------------
-/**
- * We keep things in RAM; if you want persistence, swap this for Redis/DB.
- */
+// --- 2. IN-MEMORY PROFILE/MEMORY -------------------------------------------
 const userMem = new Map();
 const imageCache = new Map();
 
@@ -50,7 +47,7 @@ function getMem(userId) {
 
         preferred_travel_type: [], // ["beach","active","urban","relaxing"]
         travel_alone_or_with: null, // "solo","family","friends"
-        desired_experience: [], // ["fun", "relaxation", "photography", "luxury", "local culture"]
+        desired_experience: [], // ["fun","relaxation","photography","luxury","local culture"]
 
         flight_preferences: {
           class: null, // "economy","premium_economy","business","first"
@@ -62,7 +59,9 @@ function getMem(userId) {
           prefer_view: null, // "sea","mountains","city","doesn't matter"
         },
 
-        budget: { prefer_comfort_or_saving: "balanced" }, // "comfort","saving","balanced"
+        budget: {
+          prefer_comfort_or_saving: "balanced", // "comfort","saving","balanced"
+        },
 
         preferred_formats: [], // ["cruise","roadtrip","resort","adventure","cultural"]
         liked_activities: [], // ["hiking","wine tasting","museums","shopping","extreme sports"]
@@ -74,14 +73,14 @@ function getMem(userId) {
   return userMem.get(userId);
 }
 
-// --- 3. SIMPLE HELPERS ------------------------------------------------------
+// --- 3. HELPERS -------------------------------------------------------------
 
 const FALLBACK_IMAGE_URL =
   "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?q=80&w=1442&auto=format&fit=crop";
 
 async function pickPhoto(dest, reqId) {
-  const cacheKey = (dest || "").toLowerCase().trim();
-  if (imageCache.has(cacheKey)) return imageCache.get(cacheKey);
+  const key = (dest || "").toLowerCase().trim();
+  if (imageCache.has(key)) return imageCache.get(key);
   if (!UNSPLASH_ACCESS_KEY) return FALLBACK_IMAGE_URL;
 
   const query = encodeURIComponent(`${dest} travel landmark`);
@@ -94,10 +93,10 @@ async function pickPhoto(dest, reqId) {
     if (!res.ok) return FALLBACK_IMAGE_URL;
     const data = await res.json();
     const img = data?.results?.[0]?.urls?.regular || FALLBACK_IMAGE_URL;
-    imageCache.set(cacheKey, img);
+    imageCache.set(key, img);
     return img;
   } catch (e) {
-    logError(reqId, "Unsplash error", e?.message || e);
+    logError(reqId, "Unsplash error:", e);
     return FALLBACK_IMAGE_URL;
   }
 }
@@ -108,15 +107,13 @@ const isSocialLink = (text = "") =>
   );
 
 const extractMultiCities = (text = "") => {
-  const segments = text
+  const parts = text
     .split(/to|->|→|,|then|\band\b/i)
     .map((s) => s.trim())
     .filter((s) => s.length > 2);
-  // If there's more than one plausible city string, treat as multi-city intent
-  return segments.length > 1 ? segments : [];
+  return parts.length > 1 ? parts : [];
 };
 
-// Parse user text & update memory
 function updateProfileFromHistory(messages, mem) {
   const lastUser = messages.filter((m) => m.role === "user").pop();
   if (!lastUser) return;
@@ -124,184 +121,177 @@ function updateProfileFromHistory(messages, mem) {
   let text = "";
   if (typeof lastUser.content === "string") text = lastUser.content;
   else if (Array.isArray(lastUser.content)) {
-    const textPart = lastUser.content.find((c) => c.type === "text");
-    if (textPart) text = textPart.text || "";
+    const t = lastUser.content.find((c) => c.type === "text");
+    if (t) text = t.text || "";
   } else if (lastUser.text) text = lastUser.text;
 
   const lower = text.toLowerCase();
-  const p = mem.profile;
+  const profile = mem.profile;
 
   // origin city
   const fromMatch = lower.match(/from\s+([a-z\s]+)/i);
-  if (fromMatch?.[1]) p.origin_city = fromMatch[1].trim();
+  if (fromMatch?.[1]) profile.origin_city = fromMatch[1].trim();
 
-  // nationality (very rough)
+  // nationality (rough)
   const natMatch = lower.match(/i am from\s+([a-z\s]+)/i);
-  if (natMatch?.[1]) p.nationality = natMatch[1].trim();
+  if (natMatch?.[1]) profile.nationality = natMatch[1].trim();
 
   // travel type
   ["beach", "active", "urban", "relaxing"].forEach((t) => {
-    if (lower.includes(t) && !p.preferred_travel_type.includes(t)) {
-      p.preferred_travel_type.push(t);
+    if (lower.includes(t) && !profile.preferred_travel_type.includes(t)) {
+      profile.preferred_travel_type.push(t);
     }
   });
 
-  // travel with
+  // with whom
   ["solo", "family", "friends"].forEach((t) => {
-    if (lower.includes(t)) p.travel_alone_or_with = t;
+    if (lower.includes(t)) profile.travel_alone_or_with = t;
   });
 
   // desired experience
   ["fun", "relaxation", "photography", "luxury", "local culture"].forEach(
     (t) => {
-      if (lower.includes(t) && !p.desired_experience.includes(t)) {
-        p.desired_experience.push(t);
+      if (lower.includes(t) && !profile.desired_experience.includes(t)) {
+        profile.desired_experience.push(t);
       }
     }
   );
 
   // flight class
-  [
-    "economy",
-    "premium economy",
-    "premium_economy",
-    "business",
-    "first",
-  ].forEach((cls) => {
-    if (lower.includes(cls.replace("_", " "))) {
-      p.flight_preferences.class = cls;
+  ["economy", "premium economy", "premium_economy", "business", "first"].forEach(
+    (cls) => {
+      if (lower.includes(cls.replace("_", " "))) {
+        profile.flight_preferences.class = cls;
+      }
     }
-  });
+  );
 
   // flight priority
-  ["price", "comfort", "duration"].forEach((f) => {
-    if (lower.includes(f) && !p.flight_priority.includes(f)) {
-      p.flight_priority.push(f);
+  ["price", "comfort", "duration"].forEach((p) => {
+    if (lower.includes(p) && !profile.flight_priority.includes(p)) {
+      profile.flight_priority.push(p);
     }
   });
 
   // accommodation type
   ["hotel", "apartment", "villa", "hostel"].forEach((t) => {
-    if (lower.includes(t)) p.accommodation.preferred_type = t;
+    if (lower.includes(t)) profile.accommodation.preferred_type = t;
   });
 
   // view
   ["sea", "mountains", "city", "doesn't matter", "doesnt matter"].forEach(
     (v) => {
-      if (lower.includes(v)) p.accommodation.prefer_view = v;
+      if (lower.includes(v)) profile.accommodation.prefer_view = v;
     }
   );
 
-  // budget preference
+  // budget
   ["comfort", "saving", "balanced"].forEach((b) => {
-    if (lower.includes(b)) p.budget.prefer_comfort_or_saving = b;
+    if (lower.includes(b)) profile.budget.prefer_comfort_or_saving = b;
   });
 
   // formats
   ["cruise", "roadtrip", "resort", "adventure", "cultural"].forEach((f) => {
-    if (lower.includes(f) && !p.preferred_formats.includes(f)) {
-      p.preferred_formats.push(f);
-    }
+    if (lower.includes(f) && !profile.preferred_formats.includes(f))
+      profile.preferred_formats.push(f);
   });
 
   // liked activities
   ["hiking", "wine tasting", "museums", "shopping", "extreme sports"].forEach(
     (a) => {
-      if (lower.includes(a) && !p.liked_activities.includes(a)) {
-        p.liked_activities.push(a);
-      }
+      if (lower.includes(a) && !profile.liked_activities.includes(a))
+        profile.liked_activities.push(a);
     }
   );
 
   // multi-city
   const cities = extractMultiCities(text);
-  if (cities.length > 1) p.multi_cities = cities;
+  if (cities.length > 1) profile.multi_cities = cities;
 }
 
-// --- 4. SEARCH / SERPAPI INTEGRATION ----------------------------------------
+// Date formatting for itinerary: "NOV 3"
+function formatDateToMMMDD(dateStr) {
+  if (!dateStr) return dateStr;
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  const month = d.toLocaleString("en-US", { month: "short" }).toUpperCase();
+  return `${month} ${d.getDate()}`;
+}
+
+// --- 4. SERPAPI SEARCH LAYER (HYBRID: 3 calls per city) ---------------------
 
 async function performGoogleSearch(rawQuery, reqId) {
   if (!SERPAPI_KEY) {
-    logInfo(reqId, "[SEARCH] No SERPAPI_KEY, returning stub for:", rawQuery);
-    return `Search skipped (no SERPAPI_KEY). Query was: ${rawQuery}`;
+    logInfo(reqId, "[SEARCH] No SERPAPI_KEY, returning stub");
+    return `Search skipped (no SERPAPI_KEY). Query: ${rawQuery}`;
   }
 
   const query = rawQuery || "";
   logInfo(reqId, `[SEARCH] "${query}"`);
 
-  // SPECIAL MARKERS: restaurants, hotels, activities, flights, visa, weather
-  const specialPrefix = (marker) => query.startsWith(marker);
+  const startsWith = (prefix) => query.startsWith(prefix);
 
   try {
-    // --- RESTAURANTS ---
-    if (specialPrefix("__restaurants__")) {
+    // Restaurants
+    if (startsWith("__restaurants__")) {
       const loc = query.replace("__restaurants__", "").trim();
       const url = `https://serpapi.com/search.json?engine=google_local&q=${encodeURIComponent(
         loc + " best restaurants"
       )}&hl=en&type=search&api_key=${SERPAPI_KEY}`;
-
       const data = await fetch(url).then((r) => r.json());
       return JSON.stringify(data.local_results?.slice(0, 7) || []);
     }
 
-    // --- HOTELS ---
-    if (specialPrefix("__hotels__")) {
+    // Hotels
+    if (startsWith("__hotels__")) {
       const loc = query.replace("__hotels__", "").trim();
       const url = `https://serpapi.com/search.json?engine=google_hotels&q=${encodeURIComponent(
         loc
       )}&api_key=${SERPAPI_KEY}`;
-
       const data = await fetch(url).then((r) => r.json());
       return JSON.stringify(data.properties?.slice(0, 7) || []);
     }
 
-    // --- ACTIVITIES / THINGS TO DO ---
-    if (specialPrefix("__activities__")) {
+    // Activities / POIs
+    if (startsWith("__activities__")) {
       const loc = query.replace("__activities__", "").trim();
       const url = `https://serpapi.com/search.json?engine=google_local&q=${encodeURIComponent(
         loc + " things to do"
       )}&hl=en&type=search&api_key=${SERPAPI_KEY}`;
-
       const data = await fetch(url).then((r) => r.json());
       return JSON.stringify(data.local_results?.slice(0, 10) || []);
     }
 
-    // --- FLIGHT PRICES & OPTIONS ---
-    if (specialPrefix("__flights__")) {
-      // expected pattern: "__flights__ <origin> to <destination> <dates text>"
+    // Flights (prices/options)
+    if (startsWith("__flights__")) {
       const cleaned = query.replace("__flights__", "").trim();
       const url = `https://serpapi.com/search.json?engine=google_flights&q=${encodeURIComponent(
         cleaned
       )}&api_key=${SERPAPI_KEY}`;
-
       const data = await fetch(url).then((r) => r.json());
-      // We'll return flights_results as JSON for the model to parse
       return JSON.stringify(data?.flights_results || data || {});
     }
 
-    // --- CHEAP FLIGHT DATES ---
-    if (specialPrefix("__cheap_flights__")) {
+    // Cheapest date hints
+    if (startsWith("__cheap_flights__")) {
       const cleaned = query.replace("__cheap_flights__", "").trim();
       const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
         cleaned + " cheapest month to fly"
       )}&api_key=${SERPAPI_KEY}`;
-
       const data = await fetch(url).then((r) => r.json());
       const organic =
         data.organic_results?.find((o) =>
           /cheap|cheapest|low fare|low price|affordable/i.test(o.title || "")
         ) || data.organic_results?.[0];
-
       return organic?.snippet || "No cheaper date info found.";
     }
 
-    // --- VISA REQUIREMENTS ---
-    if (specialPrefix("__visa__")) {
+    // Visa requirements
+    if (startsWith("__visa__")) {
       const cleaned = query.replace("__visa__", "").trim();
       const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
         cleaned + " visa requirements official"
       )}&api_key=${SERPAPI_KEY}`;
-
       const data = await fetch(url).then((r) => r.json());
       const organic = data.organic_results?.slice(0, 5) || [];
       return organic
@@ -309,13 +299,12 @@ async function performGoogleSearch(rawQuery, reqId) {
         .join("\n");
     }
 
-    // --- WEATHER & ALTERNATIVES ---
-    if (specialPrefix("__weather__")) {
+    // Weather info
+    if (startsWith("__weather__")) {
       const cleaned = query.replace("__weather__", "").trim();
       const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
         cleaned + " average weather"
       )}&api_key=${SERPAPI_KEY}`;
-
       const data = await fetch(url).then((r) => r.json());
       const organic = data.organic_results?.slice(0, 5) || [];
       return organic
@@ -323,56 +312,53 @@ async function performGoogleSearch(rawQuery, reqId) {
         .join("\n");
     }
 
-    // --- SOCIAL / VIDEO LINKS & GENERIC TRAVEL SEARCH -----------------------
+    // Generic travel/social search
     const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
       query
     )}&api_key=${SERPAPI_KEY}&num=10`;
     const res = await fetch(url);
     const data = await res.json();
 
-    const snippets = [];
+    const out = [];
 
-    if (data.answer_box) snippets.push(`AnswerBox: ${JSON.stringify(data.answer_box)}`);
+    if (data.answer_box) out.push(`AnswerBox: ${JSON.stringify(data.answer_box)}`);
     if (data.knowledge_graph)
-      snippets.push(`KnowledgeGraph: ${JSON.stringify(data.knowledge_graph)}`);
+      out.push(`KnowledgeGraph: ${JSON.stringify(data.knowledge_graph)}`);
 
     if (data.video_results) {
-      const vids = data.video_results
-        .slice(0, 3)
-        .map(
-          (v) =>
-            `VIDEO: ${v.title} (${v.link}) — ${v.snippet || "no snippet"}`
-        );
-      snippets.push(vids.join("\n"));
+      const vids = data.video_results.slice(0, 3).map((v) => {
+        return `VIDEO: ${v.title} (${v.link}) — ${v.snippet || "no snippet"}`;
+      });
+      out.push(vids.join("\n"));
     }
 
     if (data.flights_results) {
-      snippets.push(
+      out.push(
         "FlightsSummary: " +
           JSON.stringify(data.flights_results.slice(0, 5) || [])
       );
     }
 
     if (data.local_results) {
-      snippets.push(
+      out.push(
         "Local: " + JSON.stringify(data.local_results.slice(0, 8) || [])
       );
     }
 
     if (data.organic_results) {
       data.organic_results.slice(0, 8).forEach((r) => {
-        snippets.push(`Organic: ${r.title}: ${r.snippet || ""}`);
+        out.push(`Organic: ${r.title}: ${r.snippet || ""}`);
       });
     }
 
-    return snippets.join("\n") || "No details found.";
-  } catch (e) {
-    logError(reqId, "SerpApi Error", e);
+    return out.join("\n") || "No details found.";
+  } catch (err) {
+    logError(reqId, "SerpAPI Error", err);
     return "Search failed.";
   }
 }
 
-// --- 5. TOOLS DEFINITION ----------------------------------------------------
+// --- 5. TOOLS ---------------------------------------------------------------
 
 const tools = [
   {
@@ -380,7 +366,7 @@ const tools = [
     function: {
       name: "request_dates",
       description:
-        "Trigger a UI flow that lets the user pick start/end dates. Do not ask for dates via plain text.",
+        "Trigger the app's date picker. NEVER ask dates in plain text, always call this tool.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -389,7 +375,7 @@ const tools = [
     function: {
       name: "request_guests",
       description:
-        "Trigger a UI flow that lets the user set guests (adults, children). Do not ask via plain text.",
+        "Trigger the app's guest picker. NEVER ask guest counts in plain text, always call this tool.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -398,14 +384,14 @@ const tools = [
     function: {
       name: "search_google",
       description:
-        "Search the web for travel info, social links, prices, flights, visa, weather, hotels, restaurants, and activities. Accepts raw user URL (YouTube, TikTok, etc.) too.",
+        "Search the web via SerpAPI for flights, hotels, restaurants, activities, visa rules, weather, and also to interpret social links (YouTube/TikTok/etc).",
       parameters: {
         type: "object",
         properties: {
           query: {
             type: "string",
             description:
-              "Search query or special marker query like '__restaurants__ Paris', '__hotels__ Bali', '__activities__ Rome', '__flights__ Helsinki to Paris Jun 1-7', '__cheap_flights__ Helsinki to Tokyo', '__visa__ Finnish citizens to Japan', '__weather__ Bali in August'.",
+              "A plain search query or a special marker query like '__restaurants__ Paris', '__hotels__ Bali', '__activities__ Rome', '__flights__ Helsinki to Paris Jun 1-7', '__cheap_flights__ Helsinki to Tokyo', '__visa__ Finnish citizens to Japan', '__weather__ Bali in August'.",
           },
         },
         required: ["query"],
@@ -417,75 +403,32 @@ const tools = [
     function: {
       name: "create_plan",
       description:
-        "Finalize the travel plan JSON: use all previous search results and preferences to build a realistic, bookable trip (including multi-city if requested).",
+        "Finalize a JSON trip plan, using realistic data discovered via search_google. The client app will render this in a plan card & trip details screen.",
       parameters: {
         type: "object",
         properties: {
-          title: { type: "string", description: "Short title for the trip." },
-          location: {
-            type: "string",
-            description: "Main destination, or starting city of the trip.",
-          },
+          // compatibility with your existing frontend shape:
+          location: { type: "string" },
           country: { type: "string" },
-          multiCity: { type: "boolean", description: "True if multi-city trip." },
-          cities: {
-            type: "array",
-            items: { type: "string" },
-            description: "List of cities in order, for multi-city trips.",
-          },
-          dateRange: {
-            type: "string",
-            description: "Human-readable date range like '2025-06-01 to 2025-06-10'.",
-          },
-          description: {
-            type: "string",
-            description:
-              "High level description that matches the user's preferences & vibe.",
-          },
-          price: {
-            type: "number",
-            description: "Total estimated price for the trip.",
-          },
-          currency: {
-            type: "string",
-            description: "Currency code like 'USD', 'EUR', etc.",
-          },
+          dateRange: { type: "string" },
+          description: { type: "string" },
+          price: { type: "number" },
+
           weather: {
             type: "object",
             properties: {
               temp: { type: "number" },
               icon: { type: "string" },
-              summary: { type: "string" },
             },
           },
-          visa: {
-            type: "string",
-            description:
-              "Concise summary of visa requirements for the user, if relevant.",
-          },
-          flights: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                route: { type: "string" },
-                airline: { type: "string" },
-                flightNumber: { type: "string" },
-                departTime: { type: "string" },
-                arriveTime: { type: "string" },
-                cabinClass: { type: "string" },
-                price: { type: "number" },
-              },
-            },
-          },
+
           itinerary: {
             type: "array",
             items: {
               type: "object",
               properties: {
-                city: { type: "string" },
                 date: { type: "string" },
-                dayLabel: { type: "string" },
+                day: { type: "string" },
                 events: {
                   type: "array",
                   items: {
@@ -495,26 +438,22 @@ const tools = [
                         type: "string",
                         enum: ["activity", "food", "travel", "stay"],
                       },
+                      icon: { type: "string" },
                       time: { type: "string" },
+                      duration: { type: "string" },
                       title: { type: "string" },
                       details: { type: "string" },
-                      providerName: { type: "string" },
+                      provider: { type: "string" },
                       approxPrice: { type: "number" },
                     },
-                  },
-                },
-                hotel: {
-                  type: "object",
-                  properties: {
-                    name: { type: "string" },
-                    address: { type: "string" },
-                    pricePerNight: { type: "number" },
-                    totalNights: { type: "number" },
+                    required: ["type", "title", "details"],
                   },
                 },
               },
+              required: ["date", "day", "events"],
             },
           },
+
           costBreakdown: {
             type: "array",
             items: {
@@ -523,6 +462,32 @@ const tools = [
                 item: { type: "string" },
                 provider: { type: "string" },
                 details: { type: "string" },
+                price: { type: "number" },
+                iconType: { type: "string" },
+                iconValue: { type: "string" },
+              },
+            },
+          },
+
+          // Extra optional fields for richer logic, ignored safely by current frontend
+          multiCity: { type: "boolean" },
+          cities: {
+            type: "array",
+            items: { type: "string" },
+          },
+          visa: { type: "string" },
+          currency: { type: "string" },
+          flights: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                route: { type: "string" },
+                airline: { type: "string" },
+                flightNumber: { type: "string" },
+                cabinClass: { type: "string" },
+                departTime: { type: "string" },
+                arriveTime: { type: "string" },
                 price: { type: "number" },
               },
             },
@@ -539,7 +504,7 @@ const tools = [
             },
           },
         },
-        required: ["location", "description", "price"],
+        required: ["location", "price", "itinerary"],
       },
     },
   },
@@ -548,94 +513,106 @@ const tools = [
 // --- 6. SYSTEM PROMPT -------------------------------------------------------
 
 const getSystemPrompt = (profile) => `
-You are a **world-class AI TRAVEL AGENT** that works inside a mobile chat app.
+You are an advanced **AI TRAVEL AGENT** inside a mobile chat app.
 
-You DO NOT control the UI directly. Instead you:
-- Use tools to ask for dates and guests.
-- Use search_google for real-world data.
-- Use create_plan ONLY when you're ready to finalize a trip.
+You DO NOT control the UI directly. Instead, you:
+- Use tools \`request_dates\` and \`request_guests\` for dates/guests.
+- Use \`search_google\` for real-world data (flights, restaurants, hotels, attractions, visa, weather, social links).
+- Use \`create_plan\` only when you are ready to finalize a trip.
 
-You remember and use these preferences:
+Known user profile:
 - Origin city: ${profile.origin_city || "unknown"}
 - Nationality: ${profile.nationality || "unknown"}
 - Preferred travel type: ${profile.preferred_travel_type.join(", ") || "unknown"}
 - Travel with: ${profile.travel_alone_or_with || "unknown"}
-- Desired experience: ${
-  profile.desired_experience.join(", ") || "unknown"
-}
+- Desired experience: ${profile.desired_experience.join(", ") || "unknown"}
 - Flight class: ${profile.flight_preferences.class || "unknown"}
 - Flight priority: ${profile.flight_priority.join(", ") || "unknown"}
-- Accommodation type: ${
-  profile.accommodation.preferred_type || "unknown"
-}, view: ${profile.accommodation.prefer_view || "unknown"}
+- Accommodation type: ${profile.accommodation.preferred_type || "unknown"}, view: ${
+  profile.accommodation.prefer_view || "unknown"
+}
 - Budget preference: ${profile.budget.prefer_comfort_or_saving}
 - Preferred formats: ${profile.preferred_formats.join(", ") || "unknown"}
 - Liked activities: ${profile.liked_activities.join(", ") || "unknown"}
 - Multi-city intent: ${profile.multi_cities.join(" → ") || "none"}
 
 BEHAVIOR:
-1. **If key preferences are missing**, ask short, relevant follow-ups:
+
+1. **ASK FOR PREFERENCES (BUT NOT DATES/GUESTS BY TEXT)**  
+   If missing, ask short, crisp questions like:
    - "Where are you flying from?"
    - "Do you prefer beach, active, urban or relaxing trips?"
-   - "Solo, with family, or friends?"
-   - "Do you care more about price, comfort or duration for flights?"
-   - "Hotel, apartment, villa, or hostel?"
-   - "Sea, mountains, city view or doesn't matter?"
-   - "Comfort, saving, or balanced budget?"
-   - "What kind of experiences you prefer (fun, relaxation, photography, luxury, local culture)?"
-   - "Any specific activities you love (hiking, museums, shopping, etc.)?"
+   - "Solo, with family, or with friends?"
+   - "More important for flights: price, comfort or duration?"
+   - "Hotel, apartment, villa or hostel?"
+   - "Sea view, mountains, city view, or doesn't matter?"
+   - "Comfort, saving or balanced budget?"
+   - "What kind of vibe: fun, relaxation, photography, luxury, local culture?"
+   - "Any activities you love? (hiking, museums, shopping, wine tasting, extreme sports...)"
 
-   BUT: never ask for travel dates or guest counts using plain text — use tools instead.
+   NEVER ask "what dates" or "how many guests" as plain text.
+   For dates: call \`request_dates\`.  
+   For guests: call \`request_guests\`.
 
-2. **SOCIAL LINKS (YouTube/TikTok/Instagram/etc)**:
-   - If user sends a link or mentions a short video, DO NOT say "I can't open links".
-   - Call search_google with the full URL (or related keywords).
-   - Use video_results, local_results, etc. to infer:
-     - Location / city / country
-     - Type of experience (beach club, hike, rooftop bar, etc.)
-   - Then propose a trip inspired by that content.
+2. **SOCIAL LINKS (YouTube/TikTok/Instagram/etc)**  
+   If the user shares a link, do NOT say "I can't open links".
+   Instead:
+   - Call \`search_google\` with the link as the query.
+   - Use video_results/local_results/organic_results to infer:
+     - Location (city/country),
+     - Type of place (beach club, hike, café, etc.),
+     - Approximate vibe & cost.
+   - Suggest a trip inspired by that content.
 
-3. **REAL-WORLD ITINERARY**:
-   - For each city:
-     - Call search_google with "__restaurants__ CITY" to get real restaurants (JSON).
-     - Call "__hotels__ CITY" to get real hotels (JSON).
-     - Call "__activities__ CITY" to get top attractions/things-to-do (JSON).
-   - Parse those JSON responses and pick actual names, descriptions, and approximate prices.
-   - Build an itinerary with:
-     - Morning activity, lunch spot, afternoon activity, dinner, and optional evening.
-     - Real hotel(s) by name and approximate nightly price.
+3. **REAL ITINERARY CONTENT**  
+   For the main destination or each city in a multi-city trip:
+   - Call \`search_google\` with markers:
+     - "__restaurants__ CITY"
+     - "__hotels__ CITY"
+     - "__activities__ CITY"
+   - Use those JSON search results to fill \`itinerary.events\` with **real places**:
+     - Real names for restaurants, attractions, hotels.
+     - Use \`provider\` / \`approxPrice\` where possible.
+   - Structure events by time (morning/afternoon/evening) but you can be flexible.
 
-4. **FLIGHT PRICES & CHEAPER DATES**:
-   - Before or while requesting dates, if you know origin & destination:
-     - Call search_google("__cheap_flights__ ORIGIN to DESTINATION") to see if some months are cheaper.
-     - Briefly mention cheaper periods if they exist.
-   - For confirmed dates/routes:
-     - Call search_google("__flights__ ORIGIN to DESTINATION <date info>") and extract realistic flight options (airline, cabin, approx price).
+4. **FLIGHT PRICES & CHEAPER DATES**  
+   If origin & destination are known:
+   - Before or during date picking:
+     - Call \`search_google\` with "__cheap_flights__ ORIGIN to DESTINATION"
+       to see if certain months are cheaper.
+     - Briefly mention cheaper periods if found.
+   - When dates and routes are known:
+     - Call \`search_google\` with "__flights__ ORIGIN to DESTINATION <date info>"
+       and turn the results into realistic flight options in \`flights\` + \`costBreakdown\`.
 
-5. **VISA REQUIREMENTS**:
-   - If nationality and destination country are known:
-     - Call search_google("__visa__ <nationality> to <destination country>").
-     - Summarize in 1–3 lines (no legal guarantees, just an overview).
+5. **VISA REQUIREMENTS**  
+   If nationality and destination country are known:
+   - Call \`search_google\` with "__visa__ <nationality> to <country>".
+   - Summarize in about 1–3 sentences and put it into \`visa\` and/or \`description\`.
+   - Make it clear it's not legal advice, just an overview.
 
-6. **WEATHER & ALTERNATIVES**:
-   - For planned dates & destination:
-     - Call search_google("__weather__ <city> in <month>").
-     - If weather is poor or extreme, suggest alternative destinations with better weather (and briefly explain why).
+6. **WEATHER & ALTERNATIVE DESTINATIONS**  
+   If dates/destination are known or strongly implied:
+   - Call \`search_google\` with "__weather__ <city> in <month or season>".
+   - If weather is very bad or extreme, propose 1–2 alternative destinations
+     with better conditions and add them under \`alternatives\`.
 
-7. **MULTI-CITY TRIPS**:
-   - If user mentions multiple cities (e.g. "Paris, Rome, Athens"):
-     - Treat it as multiCity: true and fill cities[].
-     - Build a leg-by-leg itinerary and flights between them.
-     - Each city must have its own hotel & activities.
+7. **MULTI-CITY TRIPS**  
+   If the user mentions multiple cities (e.g., "Paris, Rome and Athens"):
+   - Treat as a multi-city trip (\`multiCity = true\`).
+   - Fill \`cities\` in \`create_plan\`.
+   - For each city, include at least one day in \`itinerary\` with:
+     - city name in \`day\` label or event titles,
+     - real hotel and activities,
+     - travel events between cities if appropriate.
 
-8. **TOOLS USAGE**:
-   - NEVER ask for dates or guests directly. Always call request_dates and request_guests.
-   - Use search_google liberally for:
-     - Hotels, restaurants, activities, flights, weather, visa, social links.
-   - Call create_plan ONLY once you have enough info for a useful plan.
+8. **create_plan USAGE**  
+   - Only call \`create_plan\` once you have enough info for a realistic plan.
+   - Make sure \`itinerary\` has dates in ISO-like format (e.g. "2025-11-03"), the backend will format to "NOV 3" for the app.
+   - Use real names, not placeholders like "Nice hotel".
 `;
 
-// --- 7. NORMALIZING MESSAGES FOR OPENAI ------------------------------------
+// --- 7. NORMALIZE MESSAGES FOR OPENAI ---------------------------------------
 
 function normalizeMessages(messages = []) {
   return messages
@@ -649,7 +626,7 @@ function normalizeMessages(messages = []) {
         };
       }
 
-      // Support vision style: array of {type:"text"| "image_url"}
+      // Vision-style input: array of text + image_url objects
       if (m.role === "user" && Array.isArray(m.content)) {
         return { role: "user", content: m.content };
       }
@@ -660,8 +637,7 @@ function normalizeMessages(messages = []) {
 
       let content = m.content || m.text || "";
       if (role === "assistant" && m.payload) {
-        // previous UI plan snapshots: compress them
-        content = "[Previous plan card was shown to user]";
+        content = "[Previous trip plan card shown to user]";
       }
 
       return { role, content: String(content) };
@@ -672,28 +648,29 @@ function normalizeMessages(messages = []) {
 
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
+
   try {
     const { messages = [], userId = "anonymous" } = req.body || {};
     const mem = getMem(userId);
     updateProfileFromHistory(messages, mem);
 
-    if (!hasKey) {
+    if (!hasKey || !client) {
       return res.json({
-        aiText: "The travel assistant is temporarily unavailable (missing API key).",
+        aiText: "The travel assistant is temporarily unavailable (no API key).",
       });
     }
 
     const systemPrompt = getSystemPrompt(mem.profile);
-    const history = [
+    const baseHistory = [
       { role: "system", content: systemPrompt },
       ...normalizeMessages(messages),
     ];
 
-    const runConversation = async (convHistory, depth = 0) => {
+    const runConversation = async (conversation, depth = 0) => {
       if (depth > 8) {
         return {
           aiText:
-            "I'm having trouble finalizing your trip after several attempts. Please try refining your request.",
+            "I'm having trouble finalizing your trip after several steps. Please try simplifying your request.",
         };
       }
 
@@ -701,131 +678,160 @@ router.post("/travel", async (req, res) => {
       try {
         completion = await client.chat.completions.create({
           model: "gpt-4o",
-          messages: convHistory,
+          messages: conversation,
           tools,
           tool_choice: "auto",
           temperature: 0.25,
         });
       } catch (err) {
         logError(reqId, "[OpenAI ERROR]", err);
-        return { aiText: "I'm having trouble connecting to the planning engine." };
+        return {
+          aiText: "I'm having trouble contacting the planning engine right now.",
+        };
       }
 
       const msg = completion.choices[0]?.message;
       if (!msg) return { aiText: "No response from planning engine." };
 
-      // --- HANDLE TOOL CALLS -------------------------------------------------
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        const toolCall = msg.tool_calls[0];
-        const toolName = toolCall.function.name;
-        let args = {};
-        try {
-          args = JSON.parse(toolCall.function.arguments || "{}");
-        } catch (e) {
-          logError(reqId, "[Tool args JSON error]", e);
-        }
+      // --- TOOL CALLS HANDLING (MULTI-TOOL SAFE) ---------------------------
+      if (msg.tool_calls?.length) {
+        let newHistory = [...conversation, msg];
 
-        logInfo(reqId, `[Tool] ${toolName}`, args);
+        for (const toolCall of msg.tool_calls) {
+          const toolName = toolCall.function.name;
+          let args = {};
+          try {
+            args = JSON.parse(toolCall.function.arguments || "{}");
+          } catch (e) {
+            logError(reqId, "[Tool args parse error]", e);
+          }
 
-        // 1) search_google: we do it here, append result as tool message, recurse
-        if (toolName === "search_google") {
-          const toolResult = await performGoogleSearch(args.query, reqId);
-          const newHistory = [
-            ...convHistory,
-            msg,
-            {
+          logInfo(reqId, `[Tool] ${toolName}`, args);
+
+          // search_google: we perform it here & add tool messages
+          if (toolName === "search_google") {
+            const toolResult = await performGoogleSearch(args.query, reqId);
+            newHistory.push({
               role: "tool",
               tool_call_id: toolCall.id,
               content: toolResult,
-            },
-          ];
-          return runConversation(newHistory, depth + 1);
-        }
+            });
+            // continue loop: there might be multiple search_google calls
+            continue;
+          }
 
-        // 2) request_dates: signal to frontend to open date picker
-        if (toolName === "request_dates") {
-          return {
-            aiText: "Please choose your travel dates.",
-            signal: { type: "dateNeeded" },
-            assistantMessage: msg,
-          };
-        }
-
-        // 3) request_guests: signal to frontend to open guest picker
-        if (toolName === "request_guests") {
-          return {
-            aiText: "How many people are traveling?",
-            signal: { type: "guestsNeeded" },
-            assistantMessage: msg,
-          };
-        }
-
-        // 4) create_plan: finalize payload for UI plan card
-        if (toolName === "create_plan") {
-          const planArgs = { ...args };
-
-          // Fallbacks & enrichment
-          planArgs.multiCity = !!planArgs.multiCity;
-          if (!Array.isArray(planArgs.cities)) planArgs.cities = [];
-          if (!Array.isArray(planArgs.itinerary)) planArgs.itinerary = [];
-          if (!Array.isArray(planArgs.flights)) planArgs.flights = [];
-          if (!Array.isArray(planArgs.costBreakdown)) planArgs.costBreakdown = [];
-          if (!Array.isArray(planArgs.alternatives)) planArgs.alternatives = [];
-
-          if (!planArgs.weather) {
-            planArgs.weather = {
-              temp: 24,
-              icon: "sunny",
-              summary: "Mild and pleasant.",
+          // UI triggers: return immediately (no further OpenAI calls with this msg)
+          if (toolName === "request_dates") {
+            return {
+              aiText: "Please choose your travel dates.",
+              signal: { type: "dateNeeded" },
+              assistantMessage: msg,
             };
           }
 
-          if (!planArgs.currency) {
-            planArgs.currency = "USD";
+          if (toolName === "request_guests") {
+            return {
+              aiText: "How many people are traveling?",
+              signal: { type: "guestsNeeded" },
+              assistantMessage: msg,
+            };
           }
 
-          // Attach photo
-          try {
-            const primaryLocation =
+          if (toolName === "create_plan") {
+            // Finalize plan for frontend
+            const planArgs = { ...args };
+
+            // set multiCity defaults
+            planArgs.multiCity =
+              typeof planArgs.multiCity === "boolean"
+                ? planArgs.multiCity
+                : Array.isArray(planArgs.cities) && planArgs.cities.length > 1;
+
+            if (!Array.isArray(planArgs.cities) || planArgs.cities.length === 0) {
+              if (Array.isArray(mem.profile.multi_cities) && mem.profile.multi_cities.length > 1) {
+                planArgs.cities = mem.profile.multi_cities;
+                planArgs.multiCity = true;
+              } else {
+                planArgs.cities = [];
+              }
+            }
+
+            if (!Array.isArray(planArgs.itinerary)) planArgs.itinerary = [];
+            if (!Array.isArray(planArgs.costBreakdown))
+              planArgs.costBreakdown = [];
+            if (!Array.isArray(planArgs.flights)) planArgs.flights = [];
+            if (!Array.isArray(planArgs.alternatives))
+              planArgs.alternatives = [];
+
+            if (!planArgs.weather) {
+              planArgs.weather = { temp: 24, icon: "sunny" };
+            }
+
+            if (!planArgs.currency) {
+              planArgs.currency = "USD";
+            }
+
+            // Format itinerary dates: "NOV 3"
+            for (const day of planArgs.itinerary) {
+              if (day.date) day.date = formatDateToMMMDD(day.date);
+            }
+
+            // Attach image
+            try {
+              const primaryLoc =
+                planArgs.multiCity && planArgs.cities.length > 0
+                  ? planArgs.cities[0]
+                  : planArgs.location;
+              planArgs.image = await pickPhoto(primaryLoc || "travel", reqId);
+            } catch (e) {
+              planArgs.image = FALLBACK_IMAGE_URL;
+            }
+
+            // Price fallback
+            if (
+              typeof planArgs.price !== "number" ||
+              Number.isNaN(planArgs.price)
+            ) {
+              planArgs.price = 0;
+            }
+
+            const mainLocation =
               planArgs.multiCity && planArgs.cities.length > 0
-                ? planArgs.cities[0]
+                ? planArgs.cities.join(" → ")
                 : planArgs.location;
-            planArgs.image = await pickPhoto(primaryLocation || "travel", reqId);
-          } catch (e) {
-            planArgs.image = FALLBACK_IMAGE_URL;
+
+            return {
+              aiText: `I've prepared a trip plan for ${mainLocation}.`,
+              signal: { type: "planReady", payload: planArgs },
+              assistantMessage: msg,
+            };
           }
 
-          // price fallback
-          if (typeof planArgs.price !== "number" || Number.isNaN(planArgs.price)) {
-            planArgs.price = 0;
-          }
-
-          const mainLocation =
-            planArgs.multiCity && planArgs.cities.length > 0
-              ? planArgs.cities.join(" → ")
-              : planArgs.location;
-
+          // Unknown tool (shouldn't happen)
+          logError(reqId, "[Unknown tool]", toolName);
+          // we don't push tool result because we can't fabricate content;
+          // but we also won't call OpenAI again with missing tool responses.
           return {
-            aiText: `I've prepared a trip plan for ${mainLocation}.`,
-            signal: { type: "planReady", payload: planArgs },
-            assistantMessage: msg,
+            aiText: "I tried to use a tool I don't recognize.",
           };
         }
 
-        // Unknown tool: return safe fallback
-        logError(reqId, "Unknown tool called:", toolName);
-        return { aiText: "I tried to use a tool I don't recognize." };
+        // If we are here, all tool_calls were search_google calls and have responses;
+        // now we can safely recurse with newHistory.
+        return runConversation(newHistory, depth + 1);
       }
 
-      // --- NO TOOL CALLS → Just normal text content -------------------------
+      // NO TOOL CALLS → plain assistant message
       return { aiText: msg.content };
     };
 
-    const response = await runConversation(history);
+    const response = await runConversation(baseHistory);
     return res.json(response);
   } catch (err) {
     logError(reqId, "[ROUTE ERROR]", err);
-    return res.status(500).json({ aiText: "System error while planning trip." });
+    return res.status(500).json({
+      aiText: "A server error occurred while planning the trip.",
+    });
   }
 });
 
