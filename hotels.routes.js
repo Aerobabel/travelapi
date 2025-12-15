@@ -83,18 +83,21 @@ const fallbackImg = (seed = "hotel") =>
   )}`;
 
 // Map Amadeus hotel offer → your frontend Hotel card (image injected later)
-const mapOfferToHotelCard = (offerItem) => {
+const mapOfferToHotelCard = (offerItem, nights) => {
   const hotel = offerItem.hotel || {};
   const firstOffer = (offerItem.offers && offerItem.offers[0]) || {};
   const priceObj = firstOffer.price || {};
   const priceTotal = Number(priceObj.total ?? priceObj.base ?? 0);
-  const currency = priceObj.currency || "USD"; // Capture currency
+  const currency = priceObj.currency || "USD";
+
+  // Normalize to per-night price if valid nights provided
+  const perNight = nights > 0 ? Math.round(priceTotal / nights) : priceTotal;
 
   return {
     id: hotel.hotelId || String(Math.random()),
     title: hotel.name || "Hotel",
-    price: priceTotal || 0,
-    currency, // Return it
+    price: perNight || 0, // Return per-night
+    currency,
     rating: hotel.rating ? Number(hotel.rating) : 0,
     tags: [],
     distance:
@@ -370,10 +373,13 @@ router.get("/hotels", async (req, res) => {
 
     const items = await fetchOffersForHotelIdsChunked(hotelIds, baseParams, 30);
 
+    // Calculate nights for price normalization
+    const nights = Math.max(1, nightsBetween(checkIn, checkOut));
+
     // Map → UI, then swap images with Unsplash (parallelized)
     let hotels = await Promise.all(
       items.map(async (it) => {
-        const card = mapOfferToHotelCard(it);
+        const card = mapOfferToHotelCard(it, nights);
         const city = it.hotel?.cityCode || cityCode;
         const img =
           await fetchUnsplashImage(`${card.title} hotel ${city}`, { fallbackSeed: card.title }) ||
