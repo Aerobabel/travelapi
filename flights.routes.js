@@ -26,7 +26,10 @@ const getCode = (label) => {
 };
 
 const normalizeOffer = (fo) => {
-  const price = Number(fo?.price?.grandTotal || fo?.price?.total || 0);
+  const priceObj = fo?.price || {};
+  const price = Number(priceObj.grandTotal || priceObj.total || 0);
+  const currency = priceObj.currency || 'USD'; // Capture currency
+
   const it = fo?.itineraries?.[0];
   const segs = it?.segments || [];
   const seg0 = segs[0];
@@ -68,7 +71,8 @@ const normalizeOffer = (fo) => {
 
   return {
     id: fo?.id || `${airportFrom}-${airportTo}-${depart}`,
-    price: Math.round(price),
+    price: price, // Return raw float (e.g. 150.50)
+    currency,     // Return currency code
     airline: carrier,
     duration,
     depart,
