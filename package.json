@@ -7,14 +7,15 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.11.0",
     "amadeus": "^8.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "express": "^4.21.2",
     "morgan": "^1.10.0",
     "openai": "^5.21.0",
-    "@google/generative-ai": "^0.11.0",
-    "serpapi": "^1.1.1"
+    "serpapi": "^1.1.1",
+    "stripe": "^20.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
