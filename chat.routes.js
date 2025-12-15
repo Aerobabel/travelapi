@@ -545,9 +545,13 @@ Your goal:
     - Short title example: "Flight ABV → SVO (Turkish Airlines TK624)".
 
 - Use **real hotels**:
-  - Real property names, approximate nightly rates, and ratings.
+  - Real property names, approximate nightly rates, and ratings. 
+  - Aim for high-rated, characterful stays (boutique, luxury, or unique local spots) rather than just generic chains.
 - Use **real restaurants and activities**:
   - Real venue/tour names, taken from search results.
+  - **CRITICAL:** Search for "hidden gems", "local favorites", "best kept secrets", and "unique experiences".
+  - **DIVERSITY:** Ensure the plan has a mix of culture, culinary, relaxation, and active elements.
+  - **LOGISTICS:** Group activities by neighborhood to minimize travel time. Don't zigzag across the city.
 
 =====================================
 ITINERARY & create_plan
@@ -684,7 +688,7 @@ router.post("/travel", async (req, res) => {
       let completion;
       try {
         completion = await client.chat.completions.create({
-          model: "gpt-4o",
+          model: "gpt-5.2",
           messages: conversation,
           tools,
           tool_choice: "auto",

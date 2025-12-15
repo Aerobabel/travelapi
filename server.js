@@ -1,5 +1,5 @@
 // server.js
-import 'dotenv/config';   
+import 'dotenv/config';
 import express from "express";
 import cors from "cors";
 
@@ -11,6 +11,7 @@ import chatRoutes from "./chat.routes.js";
 // New: cruises router (mock, no DB)
 import cruisesRouter from "./cruises.routes.js";
 import flightsRouter from "./flights.routes.js";
+import bookingsRouter from "./bookings.routes.js";
 
 const app = express();
 
@@ -36,7 +37,8 @@ app.use(hotelsRouter);
 app.use(transfersRouter);
 app.use(cruisesRouter);
 app.use(chatRoutes);
-app.use(flightsRouter); 
+app.use(flightsRouter);
+app.use(bookingsRouter);
 
 // Health check
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
@@ -62,6 +64,7 @@ app.use((err, _req, res, _next) => {
 /* -------------------------------- Start -------------------------------- */
 
 const PORT = process.env.PORT || 5174;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Travel API running on http://localhost:${PORT}`);
 });
+server.setTimeout(300000);
