@@ -86,12 +86,15 @@ const fallbackImg = (seed = "hotel") =>
 const mapOfferToHotelCard = (offerItem) => {
   const hotel = offerItem.hotel || {};
   const firstOffer = (offerItem.offers && offerItem.offers[0]) || {};
-  const priceTotal = Number(firstOffer.price?.total ?? firstOffer.price?.base ?? 0);
+  const priceObj = firstOffer.price || {};
+  const priceTotal = Number(priceObj.total ?? priceObj.base ?? 0);
+  const currency = priceObj.currency || "USD"; // Capture currency
 
   return {
     id: hotel.hotelId || String(Math.random()),
     title: hotel.name || "Hotel",
     price: priceTotal || 0,
+    currency, // Return it
     rating: hotel.rating ? Number(hotel.rating) : 0,
     tags: [],
     distance:
@@ -113,7 +116,10 @@ const mapOfferToRoom = (offer, nights) => {
       ? `${type.beds} ${String(type.bedType).toLowerCase()} bed${type.beds > 1 ? "s" : ""}`
       : desc || "Room";
 
-  const total = Number(offer.price?.total || 0);
+  const priceObj = offer.price || {};
+  const total = Number(priceObj.total || 0);
+  const currency = priceObj.currency || "USD";
+
   const perNight = nights > 0 ? Math.round(total / nights) : total;
 
   const tags = [];
@@ -130,6 +136,7 @@ const mapOfferToRoom = (offer, nights) => {
     bed: beds,
     img: fallbackImg(offer.room?.name || "room"), // replaced asynchronously with Unsplash
     price: perNight,
+    currency, // Pass to frontend
     tags,
     perks,
   };
@@ -399,6 +406,11 @@ router.get("/hotels", async (req, res) => {
         break;
     }
 
+    // Verify currency/price in logs
+    if (hotels.length > 0) {
+      console.log(`[GET /hotels] First hotel price: ${hotels[0].price} (raw currency check needed)`);
+    }
+
     res.json({ hotels });
   } catch (e) {
     console.error("hotels error", e?.response?.data || e);
@@ -423,8 +435,15 @@ router.get("/hotels/:id/rooms", async (req, res) => {
     if (checkOut) params.checkOutDate = String(checkOut);
 
     const r = await amadeus.shopping.hotelOffersSearch.get(params);
-    const items = r?.data?.[0]?.offers || [];
-    const baseRooms = items.map((offer) => mapOfferToRoom(offer, nights));
+    const hotelData = r?.data?.[0]; // The hotel object
+    const offers = hotelData?.offers || [];
+
+    console.log(`[GET /hotels/:id/rooms] Found ${offers.length} offers for hotel ${id}`);
+    if (offers.length > 0) {
+      console.log('[Debug] First Offer Price:', JSON.stringify(offers[0].price, null, 2));
+    }
+
+    const baseRooms = offers.map((offer) => mapOfferToRoom(offer, nights));
 
     // Replace room images with Unsplash variants (parallel)
     const rooms = await Promise.all(
