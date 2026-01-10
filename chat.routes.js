@@ -1,7 +1,7 @@
 // server/chat.routes.js
+import dotenv from "dotenv";
 import { Router } from "express";
 import OpenAI from "openai";
-import dotenv from "dotenv";
 
 dotenv.config();
 
@@ -217,6 +217,8 @@ async function performGoogleSearch(rawQuery, reqId) {
         rating: r.rating,
         type: r.type,
         address: r.address,
+        latitude: r.gps_coordinates?.latitude,
+        longitude: r.gps_coordinates?.longitude,
       }));
       return JSON.stringify(results);
     }
@@ -235,6 +237,8 @@ async function performGoogleSearch(rawQuery, reqId) {
         rating: p.overall_rating,
         description: p.description,
         link: p.link,
+        latitude: p.gps_coordinates?.latitude,
+        longitude: p.gps_coordinates?.longitude,
       }));
       return JSON.stringify(results);
     }
@@ -290,6 +294,8 @@ async function performGoogleSearch(rawQuery, reqId) {
         type: r.type,
         rating: r.rating,
         description: r.description,
+        latitude: r.gps_coordinates?.latitude,
+        longitude: r.gps_coordinates?.longitude,
       }));
       return JSON.stringify(results);
     }
@@ -409,6 +415,8 @@ const tools = [
                           "REAL NAME of place/airline/hotel/tour operator. Never generic.",
                       },
                       approxPrice: { type: "number" },
+                      latitude: { type: "number" },
+                      longitude: { type: "number" },
                     },
                     required: ["type", "title", "details", "provider"],
                   },
@@ -580,6 +588,7 @@ When you call \`create_plan\`:
 
 - Activities:
   - Use attraction or tour names from \`__activities__\` results or your best known real-world names.
+  - **CRITICAL**: If the search results provided 'latitude' and 'longitude', you MUST include them in the event object.
 
 >>> HARD RULE: NO TEXT-ONLY FULL ITINERARIES <<<
 - You are FORBIDDEN from writing a full day-by-day itinerary in normal chat messages.
