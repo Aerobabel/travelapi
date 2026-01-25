@@ -1339,12 +1339,20 @@ router.post("/travel", async (req, res) => {
                    else if (cleanProv.includes("turkish")) domain = "turkishairlines.com";
                    else if (cleanProv.includes("emirates")) domain = "emirates.com";
                    else if (cleanProv.includes("lufthansa")) domain = "lufthansa.com";
-                   else domain = `${cleanProv}.com`; // Hope for the best (e.g. radisson.com)
+                   // Fallback for Codes if dictionary failed
+                   else if (cleanProv === "tk") domain = "turkishairlines.com";
+                   else if (cleanProv === "w6" || cleanProv === "wizz") domain = "wizzair.com";
+                   else if (cleanProv === "fr" || cleanProv === "ryanair") domain = "ryanair.com";
+                   else if (cleanProv === "ba") domain = "ba.com";
+                   else if (cleanProv === "af") domain = "airfrance.com";
+                   else if (cleanProv === "lh") domain = "lufthansa.com";
+                   else domain = `${cleanProv}.com`; 
                }
 
                if (domain) {
                    item.iconType = 'image';
-                   item.iconValue = `https://logo.clearbit.com/${domain}`;
+                   // Use Google Favicons (High Res) - often more reliable than Clearbit for random domains
+                   item.iconValue = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
                }
            });
 
