@@ -1269,16 +1269,16 @@ router.post("/travel", async (req, res) => {
              const f0 = plan.flights[0];
              
              // Outbound details
-             let outStr = `${f0.duration}`;
-             if (f0.stops > 0) outStr += ` / ${f0.stops} change`;
-             else outStr += ` / Direct`;
+             let outStr = "";
+             if (f0.stops > 0) outStr = `${f0.stops} change${f0.stops > 1 ? 's' : ''}`;
+             else outStr = `Direct`;
 
              // Return details
              const extra = [outStr];
              if (f0.isRoundTrip) {
-                let retStr = `${f0.returnDuration}`;
-                if (f0.returnStops > 0) retStr += ` / ${f0.returnStops} change`;
-                else retStr += ` / Direct`;
+                let retStr = "";
+                if (f0.returnStops > 0) retStr = `${f0.returnStops} change${f0.returnStops > 1 ? 's' : ''}`;
+                else retStr = `Direct`;
                 extra.push(`Ret: ${retStr}`);
              }
 
