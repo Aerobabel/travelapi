@@ -94,7 +94,7 @@ const getCode = (label) => {
   return null;
 };
 
-const normalizeOffer = (fo) => {
+const normalizeOffer = (fo, dictionaries = {}) => {
   const priceObj = fo?.price || {};
   const price = Number(priceObj.grandTotal || priceObj.total || 0);
 
@@ -118,9 +118,14 @@ const normalizeOffer = (fo) => {
   const depart = departISO.slice(11, 16);
   const arrive = arriveISO.slice(11, 16);
 
-  const carrier = seg0?.carrierCode || fo?.validatingAirlineCodes?.[0] || '';
+  const carrierCode = seg0?.carrierCode || fo?.validatingAirlineCodes?.[0] || '';
+  const carrierName = dictionaries?.carriers?.[carrierCode] 
+      ? dictionaries.carriers[carrierCode].replace(/\bAIRLINES\b/i, '').trim() // Clean "TURKISH AIRLINES" -> "TURKISH" for better matching? No keep full name.
+      : carrierCode;
+      
+  const carrier = dictionaries?.carriers?.[carrierCode] || carrierCode;
   const flNum = seg0?.number || '';
-  const flightNumber = (carrier && flNum) ? `${carrier}${flNum}` : '';
+  const flightNumber = (carrierCode && flNum) ? `${carrierCode}${flNum}` : '';
 
   const isoDuration = it?.duration || '';
   const duration = isoDuration.replace('PT', '').toLowerCase();
@@ -905,7 +910,7 @@ router.post("/travel", async (req, res) => {
             const originCode = getCode(args.origin) || args.origin.toUpperCase();
             const destCode = getCode(args.destination) || args.destination.toUpperCase();
             // Simple search
-            const { data } = await amadeus.shopping.flightOffersSearch.post(JSON.stringify({
+            const response = await amadeus.shopping.flightOffersSearch.post(JSON.stringify({
               currencyCode: 'USD',
               originDestinations: [
                 {
@@ -918,10 +923,13 @@ router.post("/travel", async (req, res) => {
               travelers: [{ id: '1', travelerType: 'ADULT' }],
               sources: ['GDS']
             }));
+            const data = response.data;
+            const dictionaries = response.result?.dictionaries || {};
+            
             const offers = data ? data.slice(0, 5) : [];
             if (offers.length) {
               // 1. Convert to structured objects
-              const structured = offers.map(o => normalizeOffer(o));
+              const structured = offers.map(o => normalizeOffer(o, dictionaries));
               // 2. Save to memory for fallback
               mem.lastFlights = structured;
               
