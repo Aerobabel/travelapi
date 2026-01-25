@@ -1198,6 +1198,7 @@ router.post("/travel", async (req, res) => {
                       depart: f0.departTime, // Frontend expects 'depart'
                       arrive: f0.arriveTime, // Frontend expects 'arrive'
                       origin: origin || f0.departure_airport_code,
+                      destination: destination || f0.arrival_airport_code,
                       layover: f0.layover // Pass the layover string
                    };
                    // Identify if we can improve the provider name
