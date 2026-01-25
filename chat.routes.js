@@ -1289,6 +1289,13 @@ router.post("/travel", async (req, res) => {
              });
           }
 
+           // --- FINAL PRICE RECALCULATION ---
+           // Ensure the displayed total accurately reflects the sum of the breakdown items
+           if (plan.costBreakdown.length > 0) {
+               const calculatedTotal = plan.costBreakdown.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+               plan.price = calculatedTotal;
+           }
+
           return {
             aiText: `I've built a plan for ${plan.location}.`,
             signal: { type: "planReady", payload: plan },
