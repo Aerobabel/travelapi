@@ -993,6 +993,11 @@ router.post("/travel", async (req, res) => {
           // --- ITINERARY SYNC: INJECT REAL FLIGHT DETAILS ---
           // Run this BEFORE formatting dates so we can match ISO strings
           if (plan.flights && plan.flights.length > 0 && plan.itinerary) {
+              logInfo(reqId, "Syncing flights to itinerary...", { 
+                  flightDate: plan.flights[0].departDate, 
+                  itinDates: plan.itinerary.map(d => d.date) 
+              });
+              
               plan.flights.forEach(f => {
                   if (f.departDate) {
                       const day = plan.itinerary.find(d => 
@@ -1000,18 +1005,24 @@ router.post("/travel", async (req, res) => {
                           (d.day && d.day.startsWith(f.departDate))
                       );
                       
-                      if (day && day.events) {
-                          const ev = day.events.find(e => 
+                      if (day) {
+                          const ev = day.events ? day.events.find(e => 
                               e.type === 'travel' || 
                               (e.title && e.title.toLowerCase().includes('flight'))
-                          );
+                          ) : null;
+                          
                           if (ev) {
+                              logInfo(reqId, "Found matching event for sync:", ev.title);
                               if (f.duration) ev.duration = f.duration;
                               if (f.flightNumber && (!ev.title || !ev.title.includes(f.flightNumber))) {
                                   ev.title = `Flight ${f.flightNumber} (${f.airline})`;
                                   ev.provider = f.airline; 
                               }
+                          } else {
+                              logInfo(reqId, "Day found but no Flight/Travel event", day);
                           }
+                      } else {
+                         logInfo(reqId, "No matching day found for flight date:", f.departDate);
                       }
                   }
               });
