@@ -109,6 +109,9 @@ const normalizeOffer = (fo) => {
   const arrive = arriveISO.slice(11, 16);
 
   const carrier = seg0?.carrierCode || fo?.validatingAirlineCodes?.[0] || '';
+  const flNum = seg0?.number || '';
+  const flightNumber = (carrier && flNum) ? `${carrier}${flNum}` : '';
+
   const isoDuration = it?.duration || '';
   const duration = isoDuration.replace('PT', '').toLowerCase();
 
@@ -117,6 +120,7 @@ const normalizeOffer = (fo) => {
   return {
     price,
     airline: carrier,
+    flightNumber,
     duration,
     depart,
     arrive,
@@ -854,7 +858,7 @@ router.post("/travel", async (req, res) => {
                 const seg = o.itineraries[0].segments[0];
                 const route = `${seg.departure.iataCode}->${seg.arrival.iataCode}`;
                 const stopsPart = n.stops === 0 ? "Direct" : `${n.stops} stops`;
-                return `Flight ${n.airline} ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart}) for $${n.price}`;
+                return `Flight ${n.flightNumber} (${n.airline}) ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart}) for $${n.price}`;
               }).join('\n');
             }
           } catch (e) {
