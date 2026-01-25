@@ -1056,13 +1056,12 @@ router.post("/travel", async (req, res) => {
           if (plan.flights && plan.flights.length > 0 && plan.itinerary) {
               plan.flights.forEach(f => {
                   if (f.departDate) {
-                      // Find matching day (backend ensures itinerary items have .date in YYYY-MM-DD before this? 
-                      // actually formatDateToMMMDD runs AFTER this in original code? No, let's check order.
-                      // Wait, formatDateToMMMDD runs at line 961. This block is at 1019. 
-                      // So itinerary dates are already "Nov 20". 
-                      // We need to convert f.departDate (YYYY-MM-DD) to "Nov 20" to match!
-                      const niceDate = formatDateToMMMDD(f.departDate);
-                      const day = plan.itinerary.find(d => d.date === niceDate || d.day === niceDate);
+                      // Match by ISO date directly (AI should output YYYY-MM-DD in .date)
+                      // Or check if .date matches the formatted string? safer to check both or raw.
+                      const day = plan.itinerary.find(d => 
+                          d.date === f.departDate || 
+                          (d.day && d.day.includes(f.departDate)) 
+                      );
                       
                       if (day && day.events) {
                           const ev = day.events.find(e => 
@@ -1071,9 +1070,11 @@ router.post("/travel", async (req, res) => {
                           );
                           if (ev) {
                               // Inject correct duration
-                              if (f.duration) ev.duration = f.duration;
-                              // Inject correct title if generic
-                              if (f.flightNumber && !ev.title.includes(f.flightNumber)) {
+                              if (f.duration) {
+                                  ev.duration = f.duration; // "23h 30m"
+                              }
+                              // Inject correct title
+                              if (f.flightNumber && (!ev.title || !ev.title.includes(f.flightNumber))) {
                                   ev.title = `Flight ${f.flightNumber} (${f.airline})`;
                                   ev.provider = f.airline; 
                               }
