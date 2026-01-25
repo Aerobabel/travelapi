@@ -990,7 +990,12 @@ router.post("/travel", async (req, res) => {
                   typeof ev.duration !== "string" ||
                   !ev.duration.trim()
                 ) {
-                  ev.duration = "2h";
+                   // Smarter defaults
+                   if (ev.type === 'travel' || (ev.title && ev.title.toLowerCase().includes('flight'))) {
+                       ev.duration = "Travel"; 
+                   } else {
+                       ev.duration = "1h"; // Reduce default for regular activities
+                   }
                 }
 
                 const t = String(ev.title || "").toLowerCase();
