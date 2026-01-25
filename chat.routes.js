@@ -427,7 +427,7 @@ const tools = [
     function: {
       name: "search_google",
       description:
-        "Search for restaurants, activities, and hidden gems. Do NOT use this for flights or hotels anymore. Use prefixes: '__restaurants__ Rome', '__activities__ Tokyo'.",
+        "Search for restaurants, activities,- Make the plan REALISTIC. Do NOT use placeholder prices.\n- Provide OFFICIAL booking URLs for flights and hotels in the 'booking_url' field (e.g. 'https://www.turkishairlines.com', 'https://www.radisson.com'). Avoid generic Google Search links.\n- The user can \"Pay Now\", so accurate links are critical.ghts or hotels anymore. Use prefixes: '__restaurants__ Rome', '__activities__ Tokyo'.",
       parameters: {
         type: "object",
         properties: {
@@ -549,6 +549,7 @@ const tools = [
                 price: { type: "number" },
                 iconType: { type: "string" },
                 iconValue: { type: "string" },
+                booking_url: { type: "string", description: "Official homepage or booking deep link e.g. 'https://wizzair.com'. NO generic searches." },
               },
             },
           },
