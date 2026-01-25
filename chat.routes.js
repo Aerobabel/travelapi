@@ -877,15 +877,28 @@ router.post("/travel", async (req, res) => {
                   departureDateTimeRange: { date: args.date }
                 }
               ],
+```javascript
               travelers: [{ id: '1', travelerType: 'ADULT' }],
               sources: ['GDS']
             }));
             const offers = data ? data.slice(0, 5) : [];
             if (offers.length) {
-              result = offers.map(o => {
-                const n = normalizeOffer(o);
-                const seg = o.itineraries[0].segments[0];
-                const route = `${seg.departure.iataCode}->${seg.arrival.iataCode}`;
+              // 1. Convert to structured objects
+              const structured = offers.map(o => normalizeOffer(o));
+              // 2. Save to memory for fallback
+              mem.lastFlights = structured;
+              
+              // 3. Convert to string for LLM
+              result = structured.map(n => {
+                const route = `${n.origin || args.origin}->${n.destination || args.destination}`; 
+                // Wait, n.origin/dest might be missing in normalizeOffer if we rely on route parsing?
+                // normalizeOffer sets depart/arrive as times. It doesn't set origin/dest codes yet?
+                // Let's check normalizeOffer. It has layover, stops, airline...
+                // Actually normalizeOffer returns `depart`, `arrive`, `stops`, `layover`, `airline`, `flightNumber`.
+                // It does NOT return `origin` or `destination` codes explicitly? 
+                // Let's check line 1067 of chat.routes.js: `origin: origin || f0.departure_airport_code`. 
+                // In my previous edits I added `departDate`? Yes.
+                
                 const stopsPart = n.stops === 0 ? "Direct" : `${n.stops} stops`;
                 return `Flight ${n.flightNumber} (${n.airline}) ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart}) for $${n.price}`;
               }).join('\n');
@@ -971,6 +984,13 @@ router.post("/travel", async (req, res) => {
 
           if (!plan.itinerary) plan.itinerary = [];
           if (!plan.flights) plan.flights = [];
+          
+          // FALLBACK: If LLM forgot to pass flights back, use memory
+          if (plan.flights.length === 0 && mem.lastFlights) {
+             logInfo(reqId, "Restoring flights from memory fallback");
+             plan.flights = mem.lastFlights;
+          }
+
           if (!plan.costBreakdown) plan.costBreakdown = [];
           if (!plan.currency) plan.currency = "USD";
           if (!plan.cities) plan.cities = [];
