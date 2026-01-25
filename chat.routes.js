@@ -265,8 +265,8 @@ function ensureWeather(plan) {
   if (typeof plan.weather.temp !== "number") {
     plan.weather.temp = 24;
   }
-  if (!plan.weather.icon || typeof plan.weather.icon !== "string") {
-    plan.weather.icon = "☀️";
+  if (!plan.weather.icon || typeof plan.weather.icon !== "string" || plan.weather.icon.length < 3) {
+    plan.weather.icon = "partly-sunny";
   }
 }
 
@@ -996,7 +996,10 @@ router.post("/travel", async (req, res) => {
           }
 
           if (!plan.costBreakdown) plan.costBreakdown = [];
-          if (!plan.currency) plan.currency = "USD";
+          
+          // FORCE USD to avoid AI hallucinating local currency on USD prices
+          plan.currency = "USD";
+          
           if (!plan.cities) plan.cities = [];
           if (plan.cities.length > 1) plan.multiCity = true;
 
