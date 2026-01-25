@@ -1210,6 +1210,7 @@ router.post("/travel", async (req, res) => {
                  destination = parts[1].trim();
               }
 
+             plan.costBreakdown.unshift({
                 item: "Flights",
                 provider: f0.airline || "Airline",
                 details: subTitle,
