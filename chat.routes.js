@@ -94,6 +94,36 @@ const getCode = (label) => {
   return null;
 };
 
+const normalizeOffer = (fo) => {
+  const priceObj = fo?.price || {};
+  const price = Number(priceObj.grandTotal || priceObj.total || 0);
+
+  const it = fo?.itineraries?.[0];
+  const segs = it?.segments || [];
+  const seg0 = segs[0];
+  const segLast = segs[segs.length - 1];
+
+  const departISO = seg0?.departure?.at || '';
+  const arriveISO = segLast?.arrival?.at || '';
+  const depart = departISO.slice(11, 16);
+  const arrive = arriveISO.slice(11, 16);
+
+  const carrier = seg0?.carrierCode || fo?.validatingAirlineCodes?.[0] || '';
+  const isoDuration = it?.duration || '';
+  const duration = isoDuration.replace('PT', '').toLowerCase();
+
+  const stops = Math.max(0, segs.length - 1);
+
+  return {
+    price,
+    airline: carrier,
+    duration,
+    depart,
+    arrive,
+    stops
+  };
+};
+
 const FALLBACK_IMAGE_URL =
   "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&q=80";
 
@@ -820,9 +850,11 @@ router.post("/travel", async (req, res) => {
             const offers = data ? data.slice(0, 5) : [];
             if (offers.length) {
               result = offers.map(o => {
+                const n = normalizeOffer(o);
                 const seg = o.itineraries[0].segments[0];
-                const price = o.price.total;
-                return `Flight ${seg.carrierCode}${seg.number} ${seg.departure.iataCode}->${seg.arrival.iataCode} at ${seg.departure.at.slice(11, 16)} for $${price}`;
+                const route = `${seg.departure.iataCode}->${seg.arrival.iataCode}`;
+                const stopsPart = n.stops === 0 ? "Direct" : `${n.stops} stops`;
+                return `Flight ${n.airline} ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart}) for $${n.price}`;
               }).join('\n');
             }
           } catch (e) {
