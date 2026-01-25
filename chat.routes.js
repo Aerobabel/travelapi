@@ -147,7 +147,13 @@ const normalizeOffer = (fo) => {
     arrive,
     stops,
     layover,
-    departDate
+    departDate,
+    origin: seg0?.departure?.iataCode,
+    destination: segLast?.arrival?.iataCode,
+    booking_url: `https://www.skyscanner.com/transport/flights/${seg0?.departure?.iataCode}/${segLast?.arrival?.iataCode}/${departDate.slice(2, 10).replace(/-/g, '')}` // crude link
+    // Better Skyscanner Link: https://www.skyscanner.com/transport/flights/lond/nyca/251120/
+    // We need IATA codes. 
+    // And date format YYMMDD.
   };
 };
 
@@ -1113,7 +1119,7 @@ router.post("/travel", async (req, res) => {
                 ) {
                    // Smarter defaults
                    if (ev.type === 'travel' || (ev.title && ev.title.toLowerCase().includes('flight'))) {
-                       ev.duration = "Travel"; 
+                       ev.duration = "2h"; // Default if still missing after sync
                    } else {
                        ev.duration = "1h"; // Reduce default for regular activities
                    }
@@ -1204,21 +1210,21 @@ router.post("/travel", async (req, res) => {
                  destination = parts[1].trim();
               }
 
-             plan.costBreakdown.unshift({ 
-               item: "Flights",
-               provider: f0.airline || "Airline",
-               details: subTitle,
-               price: f0.price || 0,
-               iconType: "plane",
-               iconValue: "✈️",
-               booking_url: f0.booking_url,
+                item: "Flights",
+                provider: f0.airline || "Airline",
+                details: subTitle,
+                price: f0.price || 0,
+                iconType: "plane",
+                iconValue: "✈️",
+                // Generate booking URL if missing (Amadeus offers don't have deep links usually)
+                booking_url: f0.booking_url || `https://www.skyscanner.com/transport/flights/${(f0.origin||"").toLowerCase()}/${(f0.destination||"").toLowerCase()}/${(f0.departDate||"").slice(2).replace(/-/g,'')}`,
                raw: {
                  ...f0,
                  depart: f0.departTime,
                  arrive: f0.arriveTime,
-                 origin: origin || f0.departure_airport_code,
-                 destination: destination || f0.arrival_airport_code,
-                 layover: f0.layover
+                  origin: f0.origin,
+                  destination: f0.destination,
+                  layover: f0.layover
                }
              });
           }
