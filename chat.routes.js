@@ -979,15 +979,20 @@ router.post("/travel", async (req, res) => {
 
         // C. CREATE PLAN -> finalize and return
         if (toolName === "create_plan") {
+          logInfo(reqId, "[TOOL] create_plan called. Keys:", Object.keys(args));
           const plan = { ...args };
 
           if (!plan.itinerary) plan.itinerary = [];
           if (!plan.flights) plan.flights = [];
           
           // FALLBACK: If LLM forgot to pass flights back, use memory
-          if (plan.flights.length === 0 && mem.lastFlights) {
-             logInfo(reqId, "Restoring flights from memory fallback");
-             plan.flights = mem.lastFlights;
+          if (plan.flights.length === 0) {
+             if (mem.lastFlights && mem.lastFlights.length > 0) {
+                 logInfo(reqId, "Restoring flights from memory fallback (count: " + mem.lastFlights.length + ")");
+                 plan.flights = mem.lastFlights;
+             } else {
+                 logInfo(reqId, "No flights in plan AND no flights in memory fallback.");
+             }
           }
 
           if (!plan.costBreakdown) plan.costBreakdown = [];
