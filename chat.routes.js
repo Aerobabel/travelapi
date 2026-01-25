@@ -1017,13 +1017,22 @@ router.post("/travel", async (req, res) => {
           // Cost Breakdown fallback: if empty and we have flights
           if (plan.costBreakdown.length === 0 && plan.flights.length > 0) {
             const f0 = plan.flights[0];
+            const details = f0.route || "Round trip";
+            // Enrich with time/stops if available
+            const extra = [];
+            if (f0.duration) extra.push(f0.duration);
+            if (f0.stops !== undefined) extra.push(f0.stops === 0 ? "Direct" : `${f0.stops} stops`);
+            const subTitle = extra.length ? `${details} (${extra.join(', ')})` : details;
+
             plan.costBreakdown.push({
               item: "Flights",
               provider: f0.airline || "Airline",
-              details: f0.route || "Round trip",
+              details: subTitle,
               price: f0.price || 0,
               iconType: "plane",
               iconValue: "✈️",
+              // PASS THROUGH RAW DATA for custom cards
+              raw: f0
             });
           }
 
