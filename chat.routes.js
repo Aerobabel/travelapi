@@ -1238,60 +1238,67 @@ router.post("/travel", async (req, res) => {
                  return !(lower.includes("flight") || lower.includes("fly") || lower.includes("airline"));
              });
 
-             // Now append our single source of truth flight item
+             // Now append our flight items
              const f0 = plan.flights[0];
-             const details = f0.route || "Round trip";
-             // Enrich with time/stops/layover
-             // Enrich with time/stops/layover
-             const extra = [];
              
-             // Outbound details
+             // Split price handling
+             const totalFlightPrice = Number(f0.price) || 0;
+             const splitPrice = f0.isRoundTrip ? (totalFlightPrice / 2) : totalFlightPrice;
+
+             // 1. OUTBOUND ITEM
+             // Outbound details string
              let outStr = `${f0.duration}`;
              if (f0.stops > 0) outStr += ` / ${f0.stops} change`;
              else outStr += ` / Direct`;
-             extra.push(outStr);
 
-             // Return details
+             const outboundItem = {
+                item: "Fly Tickets",
+                provider: f0.airline || "Airline",
+                details: outStr,
+                price: splitPrice,
+                iconType: "plane", 
+                iconValue: "✈️",
+                booking_url: f0.booking_url,
+                raw: {
+                  ...f0,
+                  depart: f0.departTime,
+                  arrive: f0.arriveTime,
+                   origin: f0.origin,
+                   destination: f0.destination,
+                   layover: f0.layover
+                }
+             };
+
+             // 2. RETURN ITEM (if round trip)
              if (f0.isRoundTrip) {
                 let retStr = `${f0.returnDuration}`;
                 if (f0.returnStops > 0) retStr += ` / ${f0.returnStops} change`;
                 else retStr += ` / Direct`;
                 
-                // Add layover to string for Return leg since frontend only shows outbound layover in 2nd row
-                if (f0.returnLayover) retStr += ` (${f0.returnLayover})`; 
+                const returnItem = {
+                    item: "Return Flight",
+                    provider: f0.airline || "Airline", 
+                    details: retStr,
+                    price: splitPrice,
+                    iconType: "plane",
+                    iconValue: "✈️",
+                    booking_url: f0.booking_url, // Same booking link
+                    raw: {
+                        ...f0, // inherit base props
+                        depart: f0.returnDepart, // Map Return data to main props for frontend
+                        arrive: f0.returnArrive,
+                        origin: f0.destination, // SWAP Origin/Dest for return leg
+                        destination: f0.origin,
+                        layover: f0.returnLayover
+                    }
+                };
                 
-                extra.push(`Ret: ${retStr}`);
+                // Add Return first so Outbound is unshifted *on top* of it (appearing first)
+                plan.costBreakdown.unshift(returnItem);
              }
 
-             const subTitle = extra.join(' | ');
-             
-              // Simple origin/dest parsing from route "LON -> NYC"
-              let origin = ""; 
-              let destination = "";
-              if (f0.route && f0.route.includes('→')) {
-                 const parts = f0.route.split('→');
-                 origin = parts[0].trim();
-                 destination = parts[1].trim();
-              }
-
-             plan.costBreakdown.unshift({
-                item: "Flights",
-                provider: f0.airline || "Airline",
-                details: subTitle,
-                price: f0.price || 0,
-                iconType: "plane",
-                iconValue: "✈️",
-                // Generate booking URL if missing (Amadeus offers don't have deep links usually)
-                booking_url: f0.booking_url || `https://www.skyscanner.com/transport/flights/${(f0.origin||"").toLowerCase()}/${(f0.destination||"").toLowerCase()}/${(f0.departDate||"").slice(2).replace(/-/g,'')}`,
-               raw: {
-                 ...f0,
-                 depart: f0.departTime,
-                 arrive: f0.arriveTime,
-                  origin: f0.origin,
-                  destination: f0.destination,
-                  layover: f0.layover
-               }
-             });
+             // Add Outbound (top)
+             plan.costBreakdown.unshift(outboundItem);
           }
 
           return {
