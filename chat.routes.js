@@ -1071,6 +1071,13 @@ router.post("/travel", async (req, res) => {
                    if ((!item.provider || item.provider.toLowerCase() === 'airline') && f0.airline) {
                       item.provider = f0.airline;
                    }
+                   
+                   // Force update details to ensure "Duration / Stops" format
+                   const stopsText = f0.stops === 0 ? "Direct" : `${f0.stops} change`;
+                   const durText = f0.duration || "";
+                   if (durText || f0.stops !== undefined) {
+                       item.details = `${durText}${durText && stopsText ? ' / ' : ''}${stopsText}`;
+                   }
                 }
              });
           }
