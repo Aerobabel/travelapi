@@ -1247,19 +1247,23 @@ router.post("/travel", async (req, res) => {
              
              // Outbound details
              let outStr = `${f0.duration}`;
-             if (f0.stops > 0) outStr += `, ${f0.stops} stop`;
-             if (f0.layover) outStr += ` (${f0.layover})`;
-             extra.push(`Out: ${outStr}`);
+             if (f0.stops > 0) outStr += ` / ${f0.stops} change`;
+             else outStr += ` / Direct`;
+             extra.push(outStr);
 
              // Return details
              if (f0.isRoundTrip) {
                 let retStr = `${f0.returnDuration}`;
-                if (f0.returnStops > 0) retStr += `, ${f0.returnStops} stop`;
-                if (f0.returnLayover) retStr += ` (${f0.returnLayover})`;
+                if (f0.returnStops > 0) retStr += ` / ${f0.returnStops} change`;
+                else retStr += ` / Direct`;
+                
+                // Add layover to string for Return leg since frontend only shows outbound layover in 2nd row
+                if (f0.returnLayover) retStr += ` (${f0.returnLayover})`; 
+                
                 extra.push(`Ret: ${retStr}`);
              }
 
-             const subTitle = extra.join(' / ');
+             const subTitle = extra.join(' | ');
              
               // Simple origin/dest parsing from route "LON -> NYC"
               let origin = ""; 
