@@ -100,8 +100,15 @@ const normalizeOffer = (fo) => {
 
   const it = fo?.itineraries?.[0];
   const segs = it?.segments || [];
+  // Outbound
   const seg0 = segs[0];
   const segLast = segs[segs.length - 1];
+
+  // Return Leg?
+  const retIt = fo?.itineraries?.[1];
+  const retSegs = retIt?.segments || [];
+  const retSeg0 = retSegs[0];
+  const retSegLast = retSegs[retSegs.length - 1];
 
   const departISO = seg0?.departure?.at || '';
   const arriveISO = segLast?.arrival?.at || '';
@@ -136,6 +143,24 @@ const normalizeOffer = (fo) => {
      } catch (e) {
        // ignore date parse errors
      }
+      }
+  }
+
+  // Calculate Return Layover
+  let retLayover = '';
+  if (retSegs.length > 1) {
+      try {
+        const arr1 = new Date(retSegs[0].arrival.at);
+        const dep2 = new Date(retSegs[1].departure.at);
+        const diffMs = dep2 - arr1;
+        if (diffMs > 0) {
+           const hours = Math.floor(diffMs / 3600000);
+           const mins = Math.round((diffMs % 3600000) / 60000);
+           const durStr = `${hours}h${mins > 0 ? ` ${mins}m` : ''}`;
+           const stopCode = retSegs[0].arrival.iataCode;
+           retLayover = `${durStr} ${stopCode}`;
+        }
+      } catch(e) {}
   }
 
   return {
@@ -143,17 +168,21 @@ const normalizeOffer = (fo) => {
     airline: carrier,
     flightNumber,
     duration,
-    depart,
-    arrive,
     stops,
     layover,
     departDate,
     origin: seg0?.departure?.iataCode,
     destination: segLast?.arrival?.iataCode,
-    booking_url: `https://www.skyscanner.com/transport/flights/${seg0?.departure?.iataCode}/${segLast?.arrival?.iataCode}/${departDate.slice(2, 10).replace(/-/g, '')}` // crude link
-    // Better Skyscanner Link: https://www.skyscanner.com/transport/flights/lond/nyca/251120/
-    // We need IATA codes. 
-    // And date format YYMMDD.
+    booking_url: `https://www.skyscanner.com/transport/flights/${seg0?.departure?.iataCode}/${segLast?.arrival?.iataCode}/${departDate.slice(2, 10).replace(/-/g, '')}`,
+    
+    // RETURN LEG DATA
+    returnDepart: retSeg0 ? retSeg0.departure.at.slice(11, 16) : null,
+    returnArrive: retSegLast ? retSegLast.arrival.at.slice(11, 16) : null,
+    returnDuration: retIt ? retIt.duration.replace('PT', '').toLowerCase() : null,
+    returnStops: retIt ? Math.max(0, retIt.segments.length - 1) : 0,
+    returnDate: retSeg0 ? retSeg0.departure.at.slice(0, 10) : null,
+    returnLayover: retLayover,
+    isRoundTrip: !!retIt
   };
 };
 
@@ -1084,10 +1113,29 @@ router.post("/travel", async (req, res) => {
                               logInfo(reqId, "Day found but no Flight/Travel event", day);
                           }
                       } else {
-                         logInfo(reqId, "No matching day found for flight date:", f.departDate);
+                          logInfo(reqId, "No match for outbound flight date:", f.departDate);
+                       }
+                  } // end outbound sync
+
+                  // RETURN FLIGHT SYNC
+                  if (f.returnDate) {
+                      const day = plan.itinerary.find(d => 
+                           (d.date && d.date.startsWith(f.returnDate)) || 
+                           (d.day && d.day.startsWith(f.returnDate))
+                      );
+                      if (day) {
+                          const ev = day.events ? day.events.find(e => 
+                               e.type === 'travel' || (e.title && e.title.toLowerCase().includes('flight'))
+                          ) : null;
+                          if (ev) {
+                              if (f.returnDuration) ev.duration = f.returnDuration;
+                              if (!ev.title || !ev.title.includes('Return')) {
+                                 ev.title = `Return Flight (${f.airline})`;
+                              }
+                          }
                       }
                   }
-              });
+               });
           }
 
           // Format itinerary dates to "Nov 20" for frontend
@@ -1194,12 +1242,24 @@ router.post("/travel", async (req, res) => {
              const f0 = plan.flights[0];
              const details = f0.route || "Round trip";
              // Enrich with time/stops/layover
+             // Enrich with time/stops/layover
              const extra = [];
-             if (f0.duration) extra.push(f0.duration);
-             if (f0.stops !== undefined) extra.push(f0.stops === 0 ? "Direct" : `${f0.stops} stops`);
-             if (f0.layover) extra.push(f0.layover); 
+             
+             // Outbound details
+             let outStr = `${f0.duration}`;
+             if (f0.stops > 0) outStr += `, ${f0.stops} stop`;
+             if (f0.layover) outStr += ` (${f0.layover})`;
+             extra.push(`Out: ${outStr}`);
 
-             const subTitle = extra.length ? `${details} (${extra.join(', ')})` : details;
+             // Return details
+             if (f0.isRoundTrip) {
+                let retStr = `${f0.returnDuration}`;
+                if (f0.returnStops > 0) retStr += `, ${f0.returnStops} stop`;
+                if (f0.returnLayover) retStr += ` (${f0.returnLayover})`;
+                extra.push(`Ret: ${retStr}`);
+             }
+
+             const subTitle = extra.join(' / ');
              
               // Simple origin/dest parsing from route "LON -> NYC"
               let origin = ""; 
