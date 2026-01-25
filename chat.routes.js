@@ -1014,6 +1014,36 @@ router.post("/travel", async (req, res) => {
             plan.image = FALLBACK_IMAGE_URL;
           }
 
+          // --- ENRICH FLIGHTS FROM MEMORY (Merge rich data) ---
+          if (plan.flights && plan.flights.length > 0 && mem.lastFlights && mem.lastFlights.length > 0) {
+              plan.flights.forEach(f => {
+                   // Ensure we have a flight number to match
+                   const fNum = (f.flightNumber || "").replace(/\s+/g, '').toUpperCase();
+                   if (fNum) {
+                       const match = mem.lastFlights.find(mf => 
+                           (mf.flightNumber || "").replace(/\s+/g, '').toUpperCase() === fNum ||
+                           (mf.airline === f.airline && mf.price === f.price) // fallback match
+                       );
+                       if (match) {
+                           logInfo(reqId, "Enriching flight " + fNum + " from memory data");
+                           if (!f.layover) f.layover = match.layover;
+                           if (!f.departDate) f.departDate = match.departDate;
+                           if (!f.stops) f.stops = match.stops;
+                           // if (!f.duration) f.duration = match.duration; // Trust AI duration or memory? Memory is safer.
+                           // Actually AI returns formatted duration "23h30m", memory has "xh ym". 
+                           // Let's keep AI duration if present, as it might be what user saw.
+                       }
+                   }
+                   
+                   // Fallback: Derive departDate from departTime if still missing
+                   if (!f.departDate && f.departTime && f.departTime.includes('T')) {
+                        f.departDate = f.departTime.split('T')[0];
+                   } else if (!f.departDate && f.departTime && f.departTime.match(/^\d{4}-\d{2}-\d{2}/)) {
+                        f.departDate = f.departTime.slice(0, 10);
+                   }
+              });
+          }
+
           // --- ITINERARY SYNC: INJECT REAL FLIGHT DETAILS ---
           // Run this BEFORE formatting dates so we can match ISO strings
           if (plan.flights && plan.flights.length > 0 && plan.itinerary) {
