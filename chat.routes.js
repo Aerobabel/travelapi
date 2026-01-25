@@ -736,9 +736,15 @@ When you call \`create_plan\`:
 - Restaurants / Food:
   - Use restaurant names from \`__restaurants__\` results.
 
-- Activities:
   - Use attraction or tour names from \`__activities__\` results or your best known real-world names.
   - **CRITICAL**: If the search results provided 'latitude' and 'longitude', you MUST include them in the event object.
+
+- Cost Breakdown (\`costBreakdown\`):
+  - You MUST explicitly include these items if valid for the trip:
+    - "Transfers" (e.g. "Transfer to hotel", "Transfer to airport") -> Provider "GetTransfer" or local.
+    - "Insurance" (e.g. "Medical Insurance", "Visa Insurance") -> Provider "Axa" or "Allianz".
+    - "Excursions" (e.g. "City Tour", "Museum Ticket") -> Provider "GetYourGuide" or local.
+  - Make sure to assign realistic prices to them.
 
 >>> HARD RULE: NO TEXT-ONLY FULL ITINERARIES <<<
 - You are FORBIDDEN from writing a full day-by-day itinerary in normal chat messages.
@@ -1288,6 +1294,51 @@ router.post("/travel", async (req, res) => {
                 }
              });
           }
+
+           // --- ENRICH LOGOS & URLS (NEW) ---
+           // Add logos for providers and ensure booking URLs for new items
+           plan.costBreakdown.forEach(item => {
+               const lowerItem = (item.item || "").toLowerCase();
+               const lowerProv = (item.provider || "").toLowerCase();
+               
+               // 1. Smart URL Map
+               if (!item.booking_url) {
+                   if (lowerProv.includes("gettransfer") || lowerItem.includes("transfer")) item.booking_url = "https://gettransfer.com";
+                   else if (lowerProv.includes("axa")) item.booking_url = "https://www.axa-schengen.com";
+                   else if (lowerProv.includes("allianz")) item.booking_url = "https://www.allianz-travel.com";
+                   else if (lowerProv.includes("getyourguide")) item.booking_url = "https://www.getyourguide.com";
+                   else if (lowerProv.includes("viator")) item.booking_url = "https://www.viator.com";
+                   else if (lowerProv.includes("booking.com")) item.booking_url = "https://www.booking.com";
+                   else if (lowerProv.includes("airbnb")) item.booking_url = "https://www.airbnb.com";
+               }
+
+               // 2. Logo Magic (Clearbit)
+               // Try to extract domain from booking_url first
+               let domain = "";
+               if (item.booking_url) {
+                   try {
+                       const urlObj = new URL(item.booking_url);
+                       domain = urlObj.hostname.replace('www.', '');
+                   } catch (e) {}
+               }
+               
+               // Fallback: Guess domain from provider
+               if (!domain && item.provider) {
+                   const cleanProv = item.provider.replace(/\s+/g, '').toLowerCase();
+                   // Common airline fixes
+                   if (cleanProv.includes("wizz")) domain = "wizzair.com";
+                   else if (cleanProv.includes("ryanair")) domain = "ryanair.com";
+                   else if (cleanProv.includes("turkish")) domain = "turkishairlines.com";
+                   else if (cleanProv.includes("emirates")) domain = "emirates.com";
+                   else if (cleanProv.includes("lufthansa")) domain = "lufthansa.com";
+                   else domain = `${cleanProv}.com`; // Hope for the best (e.g. radisson.com)
+               }
+
+               if (domain) {
+                   item.iconType = 'image';
+                   item.iconValue = `https://logo.clearbit.com/${domain}`;
+               }
+           });
 
            // --- FINAL PRICE RECALCULATION ---
            // Ensure the displayed total accurately reflects the sum of the breakdown items
