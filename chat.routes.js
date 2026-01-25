@@ -1284,7 +1284,6 @@ router.post("/travel", async (req, res) => {
 
              const subTitle = extra.join(' | ');
 
-             plan.costBreakdown.unshift({
                 item: "Fly Tickets", 
                 provider: f0.airline || "Airline", 
                 details: subTitle,
@@ -1294,8 +1293,15 @@ router.post("/travel", async (req, res) => {
                 booking_url: f0.booking_url,
                 raw: {
                   ...f0,
-                  depart: f0.departTime,
-                  arrive: f0.arriveTime,
+                  // STRICTLY OVERWRITE BAD AI DATES
+                  // The frontend uses these fields. We must ensure they correspond to the real ISO strings from Amadeus
+                  // f0.depart/arrive are already clean HH:MM or ISO from normalizeOffer
+                  // We also overwrite departTime/arriveTime to be safe
+                  depart: f0.depart, 
+                  arrive: f0.arrive,
+                  departTime: f0.depart,
+                  arriveTime: f0.arrive, 
+                  
                    origin: f0.origin,
                    destination: f0.destination,
                    layover: f0.layover
@@ -1339,8 +1345,16 @@ router.post("/travel", async (req, res) => {
                    else if (cleanProv.includes("turkish")) domain = "turkishairlines.com";
                    else if (cleanProv.includes("emirates")) domain = "emirates.com";
                    else if (cleanProv.includes("lufthansa")) domain = "lufthansa.com";
+                   else if (cleanProv.includes("royalairmaroc") || cleanProv.includes("royal")) domain = "royalairmaroc.com";
+                   else if (cleanProv.includes("klm")) domain = "klm.com";
+                   else if (cleanProv.includes("airfrance")) domain = "airfrance.com";
+                   else if (cleanProv.includes("delta")) domain = "delta.com";
+                   else if (cleanProv.includes("british")) domain = "ba.com";
+                   else if (cleanProv.includes("qatar")) domain = "qatarairways.com";
+                   
                    // Fallback for Codes if dictionary failed
                    else if (cleanProv === "tk") domain = "turkishairlines.com";
+                   else if (cleanProv === "at") domain = "royalairmaroc.com"; 
                    else if (cleanProv === "w6" || cleanProv === "wizz") domain = "wizzair.com";
                    else if (cleanProv === "fr" || cleanProv === "ryanair") domain = "ryanair.com";
                    else if (cleanProv === "ba") domain = "ba.com";
