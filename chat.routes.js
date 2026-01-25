@@ -1061,14 +1061,27 @@ router.post("/travel", async (req, res) => {
                        );
                        if (match) {
                            logInfo(reqId, "Enriching flight " + fNum + " from memory data");
-                           if (!f.layover) f.layover = match.layover;
-                           if (!f.departDate) f.departDate = match.departDate;
-                           if (!f.stops) f.stops = match.stops;
-                           if (!f.depart) f.depart = match.depart;
-                           if (!f.arrive) f.arrive = match.arrive;
-                           // if (!f.duration) f.duration = match.duration; // Trust AI duration or memory? Memory is safer.
-                           // Actually AI returns formatted duration "23h30m", memory has "xh ym". 
-                           // Let's keep AI duration if present, as it might be what user saw.
+                           // Copy ALL fields to ensure frontend gets full data
+                           f.layover = match.layover;
+                           f.departDate = match.departDate;
+                           f.stops = match.stops;
+                           f.depart = match.depart;
+                           f.arrive = match.arrive;
+                           f.origin = match.origin; // Critical for frontend
+                           f.destination = match.destination; // Critical for frontend
+                           f.booking_url = match.booking_url;
+                           
+                           // Return Leg Data
+                           f.isRoundTrip = match.isRoundTrip;
+                           f.returnDate = match.returnDate;
+                           f.returnDepart = match.returnDepart;
+                           f.returnArrive = match.returnArrive;
+                           f.returnDuration = match.returnDuration;
+                           f.returnStops = match.returnStops;
+                           f.returnLayover = match.returnLayover;
+                           
+                           // Trust memory duration if available
+                           if (match.duration) f.duration = match.duration;
                        }
                    }
                    
