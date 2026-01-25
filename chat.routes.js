@@ -143,7 +143,7 @@ const normalizeOffer = (fo) => {
      } catch (e) {
        // ignore date parse errors
      }
-      }
+
   }
 
   // Calculate Return Layover
