@@ -1032,6 +1032,8 @@ router.post("/travel", async (req, res) => {
                            if (!f.layover) f.layover = match.layover;
                            if (!f.departDate) f.departDate = match.departDate;
                            if (!f.stops) f.stops = match.stops;
+                           if (!f.depart) f.depart = match.depart;
+                           if (!f.arrive) f.arrive = match.arrive;
                            // if (!f.duration) f.duration = match.duration; // Trust AI duration or memory? Memory is safer.
                            // Actually AI returns formatted duration "23h30m", memory has "xh ym". 
                            // Let's keep AI duration if present, as it might be what user saw.
@@ -1196,10 +1198,6 @@ router.post("/travel", async (req, res) => {
                       depart: f0.departTime, // Frontend expects 'depart'
                       arrive: f0.arriveTime, // Frontend expects 'arrive'
                       origin: origin || f0.departure_airport_code,
-                      depart: f0.departTime, // Frontend expects 'depart'
-                      arrive: f0.arriveTime, // Frontend expects 'arrive'
-                      origin: origin || f0.departure_airport_code,
-                      destination: destination || f0.arrival_airport_code,
                       layover: f0.layover // Pass the layover string
                    };
                    // Identify if we can improve the provider name
@@ -1209,10 +1207,11 @@ router.post("/travel", async (req, res) => {
                    
                    // Force update details to ensure "Duration / Stops" format
                    const stopsText = f0.stops === 0 ? "Direct" : `${f0.stops} change`;
-                   const durText = f0.duration || "";
-                   if (durText || f0.stops !== undefined) {
-                       item.details = `${durText}${durText && stopsText ? ' / ' : ''}${stopsText}`;
+                   if (f0.layover) {
+                       // Ensure layover is also appended to details if confusing? No, details is fine.
                    }
+                   // Only show stops, hide total duration as it is redundant/confusing here
+                   item.details = stopsText;
                 }
              });
           }
