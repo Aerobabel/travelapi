@@ -1,4 +1,5 @@
 // server/chat.routes.js
+import Amadeus from "amadeus";
 import dotenv from "dotenv";
 import { Router } from "express";
 import OpenAI from "openai";
@@ -25,6 +26,13 @@ try {
 const router = Router();
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+
+// Amadeus client
+const amadeus = new Amadeus({
+  clientId: process.env.AMADEUS_CLIENT_ID,
+  clientSecret: process.env.AMADEUS_CLIENT_SECRET,
+  hostname: process.env.AMADEUS_HOSTNAME || 'production',
+});
 
 const SERPAPI_KEY = process.env.SERPAPI_API_KEY;
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
@@ -73,6 +81,18 @@ function getMem(userId) {
 }
 
 // --- 2. HELPERS -------------------------------------------------------------
+
+const getCode = (label) => {
+  if (!label) return null;
+  const s = String(label).trim();
+  const m = /\(([A-Za-z]{3})\)/.exec(s);
+  if (m) return m[1].toUpperCase();
+  const parts = s.split(',').map(t => t.trim());
+  const last = parts[parts.length - 1] || s;
+  if (/^[A-Za-z]{3}$/i.test(last)) return last.toUpperCase();
+  if (/^[A-Za-z]{3}$/i.test(s)) return s.toUpperCase();
+  return null;
+};
 
 const FALLBACK_IMAGE_URL =
   "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&q=80";
@@ -346,13 +366,45 @@ const tools = [
     function: {
       name: "search_google",
       description:
-        "Search real data. Use prefixes: '__flights__ Helsinki to Paris Jun 10-17', '__hotels__ Bali', '__restaurants__ Rome', '__activities__ Tokyo'. Always use real city names and realistic query phrasing.",
+        "Search for restaurants, activities, and hidden gems. Do NOT use this for flights or hotels anymore. Use prefixes: '__restaurants__ Rome', '__activities__ Tokyo'.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string" },
         },
         required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_flights",
+      description: "Search for real flights using Amadeus. Dates must be YYYY-MM-DD.",
+      parameters: {
+        type: "object",
+        properties: {
+          origin: { type: "string", description: "IATA code (e.g. LON, NYC) or City Name" },
+          destination: { type: "string", description: "IATA code (e.g. PAR, TYO) or City Name" },
+          date: { type: "string", description: "YYYY-MM-DD" },
+        },
+        required: ["origin", "destination", "date"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_hotels",
+      description: "Search for real hotels using Amadeus.",
+      parameters: {
+        type: "object",
+        properties: {
+          city: { type: "string", description: "City Name or IATA code" },
+          checkIn: { type: "string", description: "YYYY-MM-DD" },
+          checkOut: { type: "string", description: "YYYY-MM-DD" },
+        },
+        required: ["city", "checkIn", "checkOut"],
       },
     },
   },
@@ -537,9 +589,9 @@ When you have:
 - dates + guests (from tools),
 
 You MUST:
-- Call \`search_google\` with:
-  - "__flights__ ORIGIN to DESTINATION [dates]"
-  - "__hotels__ DESTINATION [dates]"
+- Call \`search_flights\` for flight options (origin/dest can be city names, I'll convert them).
+- Call \`search_hotels\` for accommodation.
+- Call \`search_google\` ONLY for:
   - "__restaurants__ DESTINATION"
   - "__activities__ DESTINATION"
 
@@ -736,6 +788,93 @@ router.post("/travel", async (req, res) => {
         // A. SEARCH -> recurse
         if (toolName === "search_google") {
           const result = await performGoogleSearch(args.query, reqId);
+          newHistory.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: result,
+          });
+          return runConversation(newHistory, depth + 1);
+        }
+
+        // A2. SEARCH FLIGHTS (AMADEUS)
+        if (toolName === "search_flights") {
+          let result = "No flights found.";
+          try {
+            // Resolve IATA
+            const originCode = getCode(args.origin) || args.origin.toUpperCase();
+            const destCode = getCode(args.destination) || args.destination.toUpperCase();
+            // Simple search
+            const { data } = await amadeus.shopping.flightOffersSearch.post(JSON.stringify({
+              currencyCode: 'USD',
+              originDestinations: [
+                {
+                  id: '1',
+                  originLocationCode: originCode,
+                  destinationLocationCode: destCode,
+                  departureDateTimeRange: { date: args.date }
+                }
+              ],
+              travelers: [{ id: '1', travelerType: 'ADULT' }],
+              sources: ['GDS']
+            }));
+            const offers = data ? data.slice(0, 5) : [];
+            if (offers.length) {
+              result = offers.map(o => {
+                const seg = o.itineraries[0].segments[0];
+                const price = o.price.total;
+                return `Flight ${seg.carrierCode}${seg.number} ${seg.departure.iataCode}->${seg.arrival.iataCode} at ${seg.departure.at.slice(11, 16)} for $${price}`;
+              }).join('\n');
+            }
+          } catch (e) {
+            result = `Flight search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
+            logError(reqId, "Amadeus Flight Error", e);
+          }
+          newHistory.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: result,
+          });
+          return runConversation(newHistory, depth + 1);
+        }
+
+        // A3. SEARCH HOTELS (AMADEUS)
+        if (toolName === "search_hotels") {
+          let result = "No hotels found.";
+          try {
+            // 1. Resolve city to IATA or use directly if 3 chars
+            let cityCode = args.city.length === 3 ? args.city.toUpperCase() : null;
+            if (!cityCode) {
+              const locs = await amadeus.referenceData.locations.get({ keyword: args.city, subType: 'CITY' });
+              cityCode = locs?.data?.[0]?.iataCode;
+            }
+
+            if (cityCode) {
+              // 2. Get Hotel IDs
+              const hList = await amadeus.referenceData.locations.hotels.byCity.get({ cityCode });
+              const hIds = (hList?.data || []).slice(0, 10).map(h => h.hotelId);
+
+              if (hIds.length > 0) {
+                // 3. Get Offers
+                const { data } = await amadeus.shopping.hotelOffersSearch.get({
+                  hotelIds: hIds.join(','),
+                  checkInDate: args.checkIn,
+                  checkOutDate: args.checkOut,
+                  adults: 1,
+                  currencyCode: 'USD'
+                });
+                if (data && data.length) {
+                  result = data.slice(0, 5).map(h => {
+                    return `Hotel ${h.hotel?.name} (${h.hotel?.hotelId}): $${h.offers?.[0]?.price?.total} total`;
+                  }).join('\n');
+                }
+              }
+            } else {
+              result = "Could not resolve city code.";
+            }
+          } catch (e) {
+            result = `Hotel search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
+            logError(reqId, "Amadeus Hotel Error", e);
+          }
           newHistory.push({
             role: "tool",
             tool_call_id: toolCall.id,
