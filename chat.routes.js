@@ -1174,13 +1174,11 @@ router.post("/travel", async (req, res) => {
               }
             });
           }
-          // 2. If breakdown exists, try to enrich "Flight" items with the detailed flight data
-             // 2. If breakdown exists, we must ensure we display the flight correctly.
-             // The AI often hallucinates multiple flight lines or generic ones.
+          else if (plan.costBreakdown.length > 0 && plan.flights.length > 0) {
              // Strategy: Remove ALL existing "Flight" line items and inject our ONE single simplified "Flights" line.
              // This guarantees no duplicates and perfect data.
              
-             // Filter out anyAI-generated flight junk
+             // Filter out any AI-generated flight entries
              plan.costBreakdown = plan.costBreakdown.filter(item => {
                  const lower = (item.item || "").toLowerCase();
                  return !(lower.includes("flight") || lower.includes("fly") || lower.includes("airline"));
@@ -1193,7 +1191,7 @@ router.post("/travel", async (req, res) => {
              const extra = [];
              if (f0.duration) extra.push(f0.duration);
              if (f0.stops !== undefined) extra.push(f0.stops === 0 ? "Direct" : `${f0.stops} stops`);
-             if (f0.layover) extra.push(f0.layover); // Add layover to details string too for visibility
+             if (f0.layover) extra.push(f0.layover); 
 
              const subTitle = extra.length ? `${details} (${extra.join(', ')})` : details;
              
@@ -1206,14 +1204,14 @@ router.post("/travel", async (req, res) => {
                  destination = parts[1].trim();
               }
 
-             plan.costBreakdown.unshift({ // Add to TOP of list
+             plan.costBreakdown.unshift({ 
                item: "Flights",
                provider: f0.airline || "Airline",
                details: subTitle,
                price: f0.price || 0,
                iconType: "plane",
                iconValue: "✈️",
-               booking_url: f0.booking_url, // Carry over if exists
+               booking_url: f0.booking_url,
                raw: {
                  ...f0,
                  depart: f0.departTime,
@@ -1222,34 +1220,6 @@ router.post("/travel", async (req, res) => {
                  destination: destination || f0.arrival_airport_code,
                  layover: f0.layover
                }
-             });
-          }
-
-             plan.costBreakdown.forEach(item => {
-                const lower = (item.item || "").toLowerCase();
-                if (lower.includes("flight") || lower.includes("fly") || lower.includes("airline")) {
-                   // Inject the raw data
-                   item.raw = {
-                      ...f0, 
-                      depart: f0.departTime, // Frontend expects 'depart'
-                      arrive: f0.arriveTime, // Frontend expects 'arrive'
-                      origin: origin || f0.departure_airport_code,
-                      destination: destination || f0.arrival_airport_code,
-                      layover: f0.layover // Pass the layover string
-                   };
-                   // Identify if we can improve the provider name
-                   if ((!item.provider || item.provider.toLowerCase() === 'airline') && f0.airline) {
-                      item.provider = f0.airline;
-                   }
-                   
-                   // Force update details to ensure "Duration / Stops" format
-                   const stopsText = f0.stops === 0 ? "Direct" : `${f0.stops} change`;
-                   if (f0.layover) {
-                       // Ensure layover is also appended to details if confusing? No, details is fine.
-                   }
-                   // Only show stops, hide total duration as it is redundant/confusing here
-                   item.details = stopsText;
-                }
              });
           }
 
