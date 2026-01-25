@@ -1284,7 +1284,8 @@ router.post("/travel", async (req, res) => {
 
              const subTitle = extra.join(' | ');
 
-                item: "Fly Tickets", 
+             plan.costBreakdown.unshift({
+                item: "Fly Tickets",  
                 provider: f0.airline || "Airline", 
                 details: subTitle,
                 price: Number(f0.price) || 0,
