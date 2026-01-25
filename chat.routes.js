@@ -105,6 +105,9 @@ const normalizeOffer = (fo) => {
 
   const departISO = seg0?.departure?.at || '';
   const arriveISO = segLast?.arrival?.at || '';
+  const intlDate = new Date(departISO);
+  const departDate = departISO ? departISO.slice(0, 10) : '';
+
   const depart = departISO.slice(11, 16);
   const arrive = arriveISO.slice(11, 16);
 
@@ -145,8 +148,10 @@ const normalizeOffer = (fo) => {
     duration,
     depart,
     arrive,
+    arrive,
     stops,
-    layover
+    layover,
+    departDate
   };
 };
 
@@ -1046,6 +1051,37 @@ router.post("/travel", async (req, res) => {
               });
             }
           });
+
+          // --- ITINERARY SYNC: INJECT REAL FLIGHT DETAILS ---
+          if (plan.flights && plan.flights.length > 0 && plan.itinerary) {
+              plan.flights.forEach(f => {
+                  if (f.departDate) {
+                      // Find matching day (backend ensures itinerary items have .date in YYYY-MM-DD before this? 
+                      // actually formatDateToMMMDD runs AFTER this in original code? No, let's check order.
+                      // Wait, formatDateToMMMDD runs at line 961. This block is at 1019. 
+                      // So itinerary dates are already "Nov 20". 
+                      // We need to convert f.departDate (YYYY-MM-DD) to "Nov 20" to match!
+                      const niceDate = formatDateToMMMDD(f.departDate);
+                      const day = plan.itinerary.find(d => d.date === niceDate || d.day === niceDate);
+                      
+                      if (day && day.events) {
+                          const ev = day.events.find(e => 
+                              e.type === 'travel' || 
+                              (e.title && e.title.toLowerCase().includes('flight'))
+                          );
+                          if (ev) {
+                              // Inject correct duration
+                              if (f.duration) ev.duration = f.duration;
+                              // Inject correct title if generic
+                              if (f.flightNumber && !ev.title.includes(f.flightNumber)) {
+                                  ev.title = `Flight ${f.flightNumber} (${f.airline})`;
+                                  ev.provider = f.airline; 
+                              }
+                          }
+                      }
+                  }
+              });
+          }
 
           // --- COST BREAKDOWN ENRICHMENT ---
           // 1. If breakdown is empty but we have flights, add a default flight item
