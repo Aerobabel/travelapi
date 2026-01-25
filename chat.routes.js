@@ -138,16 +138,11 @@ const normalizeOffer = (fo) => {
      }
   }
 
-  return {
     price,
     airline: carrier,
     flightNumber,
     duration,
     depart,
-    arrive,
-    duration,
-    depart,
-    arrive,
     arrive,
     stops,
     layover,
@@ -1179,16 +1174,55 @@ router.post("/travel", async (req, res) => {
             });
           }
           // 2. If breakdown exists, try to enrich "Flight" items with the detailed flight data
-          else if (plan.costBreakdown.length > 0 && plan.flights.length > 0) {
+             // 2. If breakdown exists, we must ensure we display the flight correctly.
+             // The AI often hallucinates multiple flight lines or generic ones.
+             // Strategy: Remove ALL existing "Flight" line items and inject our ONE single simplified "Flights" line.
+             // This guarantees no duplicates and perfect data.
+             
+             // Filter out anyAI-generated flight junk
+             plan.costBreakdown = plan.costBreakdown.filter(item => {
+                 const lower = (item.item || "").toLowerCase();
+                 return !(lower.includes("flight") || lower.includes("fly") || lower.includes("airline"));
+             });
+
+             // Now append our single source of truth flight item
              const f0 = plan.flights[0];
-             // Simple origin/dest parsing from route "LON -> NYC"
-             let origin = ""; 
-             let destination = "";
-             if (f0.route && f0.route.includes('→')) {
-                const parts = f0.route.split('→');
-                origin = parts[0].trim();
-                destination = parts[1].trim();
-             }
+             const details = f0.route || "Round trip";
+             // Enrich with time/stops/layover
+             const extra = [];
+             if (f0.duration) extra.push(f0.duration);
+             if (f0.stops !== undefined) extra.push(f0.stops === 0 ? "Direct" : `${f0.stops} stops`);
+             if (f0.layover) extra.push(f0.layover); // Add layover to details string too for visibility
+
+             const subTitle = extra.length ? `${details} (${extra.join(', ')})` : details;
+             
+              // Simple origin/dest parsing from route "LON -> NYC"
+              let origin = ""; 
+              let destination = "";
+              if (f0.route && f0.route.includes('→')) {
+                 const parts = f0.route.split('→');
+                 origin = parts[0].trim();
+                 destination = parts[1].trim();
+              }
+
+             plan.costBreakdown.unshift({ // Add to TOP of list
+               item: "Flights",
+               provider: f0.airline || "Airline",
+               details: subTitle,
+               price: f0.price || 0,
+               iconType: "plane",
+               iconValue: "✈️",
+               booking_url: f0.booking_url, // Carry over if exists
+               raw: {
+                 ...f0,
+                 depart: f0.departTime,
+                 arrive: f0.arriveTime,
+                 origin: origin || f0.departure_airport_code,
+                 destination: destination || f0.arrival_airport_code,
+                 layover: f0.layover
+               }
+             });
+          }
 
              plan.costBreakdown.forEach(item => {
                 const lower = (item.item || "").toLowerCase();
