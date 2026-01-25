@@ -1014,7 +1014,8 @@ router.post("/travel", async (req, res) => {
             }
           });
 
-          // Cost Breakdown fallback: if empty and we have flights
+          // --- COST BREAKDOWN ENRICHMENT ---
+          // 1. If breakdown is empty but we have flights, add a default flight item
           if (plan.costBreakdown.length === 0 && plan.flights.length > 0) {
             const f0 = plan.flights[0];
             const details = f0.route || "Round trip";
@@ -1032,8 +1033,42 @@ router.post("/travel", async (req, res) => {
               iconType: "plane",
               iconValue: "✈️",
               // PASS THROUGH RAW DATA for custom cards
-              raw: f0
+              raw: {
+                ...f0,
+                depart: f0.departTime, // Map schema mismatch
+                arrive: f0.arriveTime
+              }
             });
+          }
+          // 2. If breakdown exists, try to enrich "Flight" items with the detailed flight data
+          else if (plan.costBreakdown.length > 0 && plan.flights.length > 0) {
+             const f0 = plan.flights[0];
+             // Simple origin/dest parsing from route "LON -> NYC"
+             let origin = ""; 
+             let destination = "";
+             if (f0.route && f0.route.includes('→')) {
+                const parts = f0.route.split('→');
+                origin = parts[0].trim();
+                destination = parts[1].trim();
+             }
+
+             plan.costBreakdown.forEach(item => {
+                const lower = (item.item || "").toLowerCase();
+                if (lower.includes("flight") || lower.includes("fly") || lower.includes("airline")) {
+                   // Inject the raw data
+                   item.raw = {
+                      ...f0, 
+                      depart: f0.departTime, // Frontend expects 'depart'
+                      arrive: f0.arriveTime, // Frontend expects 'arrive'
+                      origin: origin || f0.departure_airport_code,
+                      destination: destination || f0.arrival_airport_code
+                   };
+                   // Identify if we can improve the provider name
+                   if ((!item.provider || item.provider.toLowerCase() === 'airline') && f0.airline) {
+                      item.provider = f0.airline;
+                   }
+                }
+             });
           }
 
           return {
