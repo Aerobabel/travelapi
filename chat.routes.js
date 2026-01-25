@@ -1238,25 +1238,31 @@ router.post("/travel", async (req, res) => {
                  return !(lower.includes("flight") || lower.includes("fly") || lower.includes("airline"));
              });
 
-             // Now append our flight items
+             // Now append our single source of truth flight item
              const f0 = plan.flights[0];
              
-             // Split price handling
-             const totalFlightPrice = Number(f0.price) || 0;
-             const splitPrice = f0.isRoundTrip ? (totalFlightPrice / 2) : totalFlightPrice;
-
-             // 1. OUTBOUND ITEM
-             // Outbound details string
+             // Outbound details
              let outStr = `${f0.duration}`;
              if (f0.stops > 0) outStr += ` / ${f0.stops} change`;
              else outStr += ` / Direct`;
 
-             const outboundItem = {
-                item: "Fly Tickets",
-                provider: f0.airline || "Airline",
-                details: outStr,
-                price: splitPrice,
-                iconType: "plane", 
+             // Return details
+             const extra = [outStr];
+             if (f0.isRoundTrip) {
+                let retStr = `${f0.returnDuration}`;
+                if (f0.returnStops > 0) retStr += ` / ${f0.returnStops} change`;
+                else retStr += ` / Direct`;
+                extra.push(`Ret: ${retStr}`);
+             }
+
+             const subTitle = extra.join(' | ');
+
+             plan.costBreakdown.unshift({
+                item: "Fly Tickets", 
+                provider: f0.airline || "Airline", 
+                details: subTitle,
+                price: Number(f0.price) || 0,
+                iconType: "plane",
                 iconValue: "✈️",
                 booking_url: f0.booking_url,
                 raw: {
@@ -1267,38 +1273,7 @@ router.post("/travel", async (req, res) => {
                    destination: f0.destination,
                    layover: f0.layover
                 }
-             };
-
-             // 2. RETURN ITEM (if round trip)
-             if (f0.isRoundTrip) {
-                let retStr = `${f0.returnDuration}`;
-                if (f0.returnStops > 0) retStr += ` / ${f0.returnStops} change`;
-                else retStr += ` / Direct`;
-                
-                const returnItem = {
-                    item: "Return Flight",
-                    provider: f0.airline || "Airline", 
-                    details: retStr,
-                    price: splitPrice,
-                    iconType: "plane",
-                    iconValue: "✈️",
-                    booking_url: f0.booking_url, // Same booking link
-                    raw: {
-                        ...f0, // inherit base props
-                        depart: f0.returnDepart, // Map Return data to main props for frontend
-                        arrive: f0.returnArrive,
-                        origin: f0.destination, // SWAP Origin/Dest for return leg
-                        destination: f0.origin,
-                        layover: f0.returnLayover
-                    }
-                };
-                
-                // Add Return first so Outbound is unshifted *on top* of it (appearing first)
-                plan.costBreakdown.unshift(returnItem);
-             }
-
-             // Add Outbound (top)
-             plan.costBreakdown.unshift(outboundItem);
+             });
           }
 
           return {
