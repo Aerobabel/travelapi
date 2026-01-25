@@ -990,6 +990,33 @@ router.post("/travel", async (req, res) => {
             plan.image = FALLBACK_IMAGE_URL;
           }
 
+          // --- ITINERARY SYNC: INJECT REAL FLIGHT DETAILS ---
+          // Run this BEFORE formatting dates so we can match ISO strings
+          if (plan.flights && plan.flights.length > 0 && plan.itinerary) {
+              plan.flights.forEach(f => {
+                  if (f.departDate) {
+                      const day = plan.itinerary.find(d => 
+                          (d.date && d.date.startsWith(f.departDate)) || 
+                          (d.day && d.day.startsWith(f.departDate))
+                      );
+                      
+                      if (day && day.events) {
+                          const ev = day.events.find(e => 
+                              e.type === 'travel' || 
+                              (e.title && e.title.toLowerCase().includes('flight'))
+                          );
+                          if (ev) {
+                              if (f.duration) ev.duration = f.duration;
+                              if (f.flightNumber && (!ev.title || !ev.title.includes(f.flightNumber))) {
+                                  ev.title = `Flight ${f.flightNumber} (${f.airline})`;
+                                  ev.provider = f.airline; 
+                              }
+                          }
+                      }
+                  }
+              });
+          }
+
           // Format itinerary dates to "Nov 20" for frontend
           plan.itinerary.forEach((day) => {
             if (day.date) {
@@ -1052,37 +1079,7 @@ router.post("/travel", async (req, res) => {
             }
           });
 
-          // --- ITINERARY SYNC: INJECT REAL FLIGHT DETAILS ---
-          if (plan.flights && plan.flights.length > 0 && plan.itinerary) {
-              plan.flights.forEach(f => {
-                  if (f.departDate) {
-                      // Match by ISO date directly (AI should output YYYY-MM-DD in .date)
-                      // Or check if .date matches the formatted string? safer to check both or raw.
-                      const day = plan.itinerary.find(d => 
-                          d.date === f.departDate || 
-                          (d.day && d.day.includes(f.departDate)) 
-                      );
-                      
-                      if (day && day.events) {
-                          const ev = day.events.find(e => 
-                              e.type === 'travel' || 
-                              (e.title && e.title.toLowerCase().includes('flight'))
-                          );
-                          if (ev) {
-                              // Inject correct duration
-                              if (f.duration) {
-                                  ev.duration = f.duration; // "23h 30m"
-                              }
-                              // Inject correct title
-                              if (f.flightNumber && (!ev.title || !ev.title.includes(f.flightNumber))) {
-                                  ev.title = `Flight ${f.flightNumber} (${f.airline})`;
-                                  ev.provider = f.airline; 
-                              }
-                          }
-                      }
-                  }
-              });
-          }
+
 
           // --- COST BREAKDOWN ENRICHMENT ---
           // 1. If breakdown is empty but we have flights, add a default flight item
