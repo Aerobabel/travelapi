@@ -116,6 +116,24 @@ const normalizeOffer = (fo) => {
   const duration = isoDuration.replace('PT', '').toLowerCase();
 
   const stops = Math.max(0, segs.length - 1);
+  
+  let layover = '';
+  if (segs.length > 1) {
+     try {
+       const arr1 = new Date(segs[0].arrival.at);
+       const dep2 = new Date(segs[1].departure.at);
+       const diffMs = dep2 - arr1;
+       if (diffMs > 0) {
+          const hours = Math.floor(diffMs / 3600000);
+          const mins = Math.round((diffMs % 3600000) / 60000);
+          const durStr = `${hours}h${mins > 0 ? ` ${mins}m` : ''}`;
+          const stopCode = segs[0].arrival.iataCode;
+          layover = `${durStr} ${stopCode}`;
+       }
+     } catch (e) {
+       // ignore date parse errors
+     }
+  }
 
   return {
     price,
@@ -124,7 +142,11 @@ const normalizeOffer = (fo) => {
     duration,
     depart,
     arrive,
-    stops
+    duration,
+    depart,
+    arrive,
+    stops,
+    layover
   };
 };
 
@@ -1072,7 +1094,11 @@ router.post("/travel", async (req, res) => {
                       depart: f0.departTime, // Frontend expects 'depart'
                       arrive: f0.arriveTime, // Frontend expects 'arrive'
                       origin: origin || f0.departure_airport_code,
-                      destination: destination || f0.arrival_airport_code
+                      depart: f0.departTime, // Frontend expects 'depart'
+                      arrive: f0.arriveTime, // Frontend expects 'arrive'
+                      origin: origin || f0.departure_airport_code,
+                      destination: destination || f0.arrival_airport_code,
+                      layover: f0.layover // Pass the layover string
                    };
                    // Identify if we can improve the provider name
                    if ((!item.provider || item.provider.toLowerCase() === 'airline') && f0.airline) {
