@@ -541,6 +541,8 @@ const tools = [
                 departTime: { type: "string" },
                 arriveTime: { type: "string" },
                 price: { type: "number" },
+                duration: { type: "string" },
+                stops: { type: "number" },
               },
             },
           },
