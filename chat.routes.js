@@ -877,7 +877,6 @@ router.post("/travel", async (req, res) => {
                   departureDateTimeRange: { date: args.date }
                 }
               ],
-```javascript
               travelers: [{ id: '1', travelerType: 'ADULT' }],
               sources: ['GDS']
             }));
