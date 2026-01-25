@@ -138,6 +138,7 @@ const normalizeOffer = (fo) => {
      }
   }
 
+  return {
     price,
     airline: carrier,
     flightNumber,
