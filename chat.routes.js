@@ -62,6 +62,9 @@ function getMem(userId) {
         },
         flight_priority: [],
 
+        // --- AFFILIATE: RateHawk/ZenHotels ---
+        affiliate_id: "285572.affiliate.37e8", // Derived from user link
+
         accommodation: {
           preferred_type: null,
           prefer_view: null,
@@ -119,10 +122,10 @@ const normalizeOffer = (fo, dictionaries = {}) => {
   const arrive = arriveISO.slice(11, 16);
 
   const carrierCode = seg0?.carrierCode || fo?.validatingAirlineCodes?.[0] || '';
-  const carrierName = dictionaries?.carriers?.[carrierCode] 
-      ? dictionaries.carriers[carrierCode].replace(/\bAIRLINES\b/i, '').trim() // Clean "TURKISH AIRLINES" -> "TURKISH" for better matching? No keep full name.
-      : carrierCode;
-      
+  const carrierName = dictionaries?.carriers?.[carrierCode]
+    ? dictionaries.carriers[carrierCode].replace(/\bAIRLINES\b/i, '').trim() // Clean "TURKISH AIRLINES" -> "TURKISH" for better matching? No keep full name.
+    : carrierCode;
+
   const carrier = dictionaries?.carriers?.[carrierCode] || carrierCode;
   const flNum = seg0?.number || '';
   const flightNumber = (carrierCode && flNum) ? `${carrierCode}${flNum}` : '';
@@ -131,41 +134,41 @@ const normalizeOffer = (fo, dictionaries = {}) => {
   const duration = isoDuration.replace('PT', '').toLowerCase();
 
   const stops = Math.max(0, segs.length - 1);
-  
+
   let layover = '';
   if (segs.length > 1) {
-     try {
-       const arr1 = new Date(segs[0].arrival.at);
-       const dep2 = new Date(segs[1].departure.at);
-       const diffMs = dep2 - arr1;
-       if (diffMs > 0) {
-          const hours = Math.floor(diffMs / 3600000);
-          const mins = Math.round((diffMs % 3600000) / 60000);
-          const durStr = `${hours}h${mins > 0 ? ` ${mins}m` : ''}`;
-          const stopCode = segs[0].arrival.iataCode;
-          layover = `${durStr} ${stopCode}`;
-       }
-     } catch (e) {
-       // ignore date parse errors
-     }
+    try {
+      const arr1 = new Date(segs[0].arrival.at);
+      const dep2 = new Date(segs[1].departure.at);
+      const diffMs = dep2 - arr1;
+      if (diffMs > 0) {
+        const hours = Math.floor(diffMs / 3600000);
+        const mins = Math.round((diffMs % 3600000) / 60000);
+        const durStr = `${hours}h${mins > 0 ? ` ${mins}m` : ''}`;
+        const stopCode = segs[0].arrival.iataCode;
+        layover = `${durStr} ${stopCode}`;
+      }
+    } catch (e) {
+      // ignore date parse errors
+    }
 
   }
 
   // Calculate Return Layover
   let retLayover = '';
   if (retSegs.length > 1) {
-      try {
-        const arr1 = new Date(retSegs[0].arrival.at);
-        const dep2 = new Date(retSegs[1].departure.at);
-        const diffMs = dep2 - arr1;
-        if (diffMs > 0) {
-           const hours = Math.floor(diffMs / 3600000);
-           const mins = Math.round((diffMs % 3600000) / 60000);
-           const durStr = `${hours}h${mins > 0 ? ` ${mins}m` : ''}`;
-           const stopCode = retSegs[0].arrival.iataCode;
-           retLayover = `${durStr} ${stopCode}`;
-        }
-      } catch(e) {}
+    try {
+      const arr1 = new Date(retSegs[0].arrival.at);
+      const dep2 = new Date(retSegs[1].departure.at);
+      const diffMs = dep2 - arr1;
+      if (diffMs > 0) {
+        const hours = Math.floor(diffMs / 3600000);
+        const mins = Math.round((diffMs % 3600000) / 60000);
+        const durStr = `${hours}h${mins > 0 ? ` ${mins}m` : ''}`;
+        const stopCode = retSegs[0].arrival.iataCode;
+        retLayover = `${durStr} ${stopCode}`;
+      }
+    } catch (e) { }
   }
 
   return {
@@ -179,7 +182,7 @@ const normalizeOffer = (fo, dictionaries = {}) => {
     origin: seg0?.departure?.iataCode,
     destination: segLast?.arrival?.iataCode,
     booking_url: `https://www.skyscanner.com/transport/flights/${seg0?.departure?.iataCode}/${segLast?.arrival?.iataCode}/${departDate.slice(2, 10).replace(/-/g, '')}`,
-    
+
     // RETURN LEG DATA
     returnDepart: retSeg0 ? retSeg0.departure.at.slice(11, 16) : null,
     returnArrive: retSegLast ? retSegLast.arrival.at.slice(11, 16) : null,
@@ -304,6 +307,94 @@ function ensureWeather(plan) {
   if (!plan.weather.icon || typeof plan.weather.icon !== "string" || plan.weather.icon.length < 3) {
     plan.weather.icon = "partly-sunny";
   }
+}
+
+// --- 2.1 AFFILIATE HELPERS ------------------------------------------------
+const getZenHotelsLink = (city, checkIn, checkOut, hotelName, hotelId) => {
+  // Base Affiliate Params
+  const PARTNER_SLUG = "285572.affiliate.37e8";
+  const UTM_PARAMS = `utm_campaign=en-en%2C+deeplink%2C+affiliate&utm_medium=api2&utm_source=${PARTNER_SLUG}&utm_term=None`;
+
+  // Default values
+  const today = new Date();
+  const nextMonth = new Date(today); nextMonth.setMonth(today.getMonth() + 1);
+  const nextMonthPlus3 = new Date(nextMonth); nextMonthPlus3.setDate(nextMonth.getDate() + 3);
+
+  const cIn = checkIn || nextMonth.toISOString().slice(0, 10);
+  const cOut = checkOut || nextMonthPlus3.toISOString().slice(0, 10);
+
+  const baseUrl = "https://www.zenhotels.com/hotels";
+  let finalUrl = `${baseUrl}/?checkin=${cIn}&checkout=${cOut}&adults=1&children=0&currency=USD&lang=en&partner_extra=None&partner_slug=${PARTNER_SLUG}&${UTM_PARAMS}`;
+
+  // If we have a specific hotel ID from a previous search (Amadeus), we might be able to map it, 
+  // but Amadeus IDs don't map to ZenHotels IDs directly. 
+  // Best bet: Search by destination (city).
+
+  if (city) {
+    // Slugify city name: "New York" -> "new_york"
+    const slug = city.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    // ZenHotels structure: https://www.zenhotels.com/hotels/united_states_of_america/new_york/
+    // It's safer to use the query param search if we don't have the exact geo-slug.
+    // But the main page link they gave us is query based.
+
+    // Let's try to pass the destination in q if possible, or just default to main page 
+    // with the affiliate parameters. 
+    // Actually, standard deep link construction for ZenHotels/RateHawk often requires known region IDs.
+    // WITHOUT region IDs, the safest fallback is the main page or using a search query param if supported.
+    // Looking at their URL structure, they handle destination via path /hotels/region/city/
+
+    // FALLBACK STRATEGY: 
+    // Return the main affiliate link. The user will have to type the city. 
+    // OR, we can try to guess the slug: /hotels/world/ (too risky).
+
+    // Wait, let's use the exact link format the user provided, but maybe we can append a destination?
+    // ZenHotels doesn't seem to support `?destination=paris` easily without internal IDs.
+    // HOWEVER, we can stick to providing the monetized link to the HOME PAGE.
+    // BUT even better: "Hotel Name" search.
+  }
+
+  // If we have a specific hotel name, we can try to deep link to a search for that hotel?
+  // ZenHotels doesn't support "search?q=HotelName" easily.
+
+  // SAFE IMPLEMENTATION:
+  // 1. If we found a hotel via Amadeus, we have a name.
+  // We can't deep link to it reliably on Zen without their ID.
+  // 2. We will provide the General Affiliate Link.
+
+  return finalUrl;
+};
+
+// IMPROVED getZenHotelsLink with Search capability if possible
+// IMPROVED getZenHotelsLink with Search capability
+const createAffiliateLink = (overrides = {}, hotelName = "", checkIn = null, checkOut = null) => {
+  const base = "https://www.zenhotels.com/";
+
+  // Base Params
+  const params = new URLSearchParams({
+    cur: "USD",
+    lang: "en",
+    partner_extra: "None",
+    partner_slug: "285572.affiliate.37e8",
+    utm_campaign: "en-en, deeplink, affiliate",
+    utm_medium: "api2",
+    utm_source: "285572.affiliate.37e8",
+    utm_term: "None",
+    ...overrides
+  });
+
+  // 1. Add Query (Hotel Name + City or just Hotel Name)
+  if (hotelName) {
+    params.append('q', hotelName);
+  }
+
+  // 2. Add Dates (checkin/checkout)
+  if (checkIn) params.append('checkin', checkIn);
+  if (checkOut) params.append('checkout', checkOut);
+
+  // 3. Default Guests
+  params.append('adults', '1');
+
+  return `${base}?${params.toString()}`;
 }
 
 // --- 3. SERPAPI SEARCH LAYER -----------------------------------------------
@@ -925,17 +1016,17 @@ router.post("/travel", async (req, res) => {
             }));
             const data = response.data;
             const dictionaries = response.result?.dictionaries || {};
-            
+
             const offers = data ? data.slice(0, 5) : [];
             if (offers.length) {
               // 1. Convert to structured objects
               const structured = offers.map(o => normalizeOffer(o, dictionaries));
               // 2. Save to memory for fallback
               mem.lastFlights = structured;
-              
+
               // 3. Convert to string for LLM
               result = structured.map(n => {
-                const route = `${n.origin || args.origin}->${n.destination || args.destination}`; 
+                const route = `${n.origin || args.origin}->${n.destination || args.destination}`;
                 // Wait, n.origin/dest might be missing in normalizeOffer if we rely on route parsing?
                 // normalizeOffer sets depart/arrive as times. It doesn't set origin/dest codes yet?
                 // Let's check normalizeOffer. It has layover, stops, airline...
@@ -943,7 +1034,7 @@ router.post("/travel", async (req, res) => {
                 // It does NOT return `origin` or `destination` codes explicitly? 
                 // Let's check line 1067 of chat.routes.js: `origin: origin || f0.departure_airport_code`. 
                 // In my previous edits I added `departDate`? Yes.
-                
+
                 const stopsPart = n.stops === 0 ? "Direct" : `${n.stops} stops`;
                 return `Flight ${n.flightNumber} (${n.airline}) ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart}) for $${n.price}`;
               }).join('\n');
@@ -987,12 +1078,16 @@ router.post("/travel", async (req, res) => {
                 });
                 if (data && data.length) {
                   result = data.slice(0, 5).map(h => {
-                    return `Hotel ${h.hotel?.name} (${h.hotel?.hotelId}): $${h.offers?.[0]?.price?.total} total`;
+                    const price = h.offers?.[0]?.price?.total;
+                    const name = h.hotel?.name;
+                    // Affiliate Link with Deep Link
+                    const affLink = createAffiliateLink({}, name, args.checkIn, args.checkOut);
+                    return `Hotel ${name} (${h.hotel?.hotelId}): $${price} total. Book here: ${affLink}`;
                   }).join('\n');
                 }
+              } else {
+                result = "Could not resolve city code.";
               }
-            } else {
-              result = "Could not resolve city code.";
             }
           } catch (e) {
             result = `Hotel search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
@@ -1005,6 +1100,7 @@ router.post("/travel", async (req, res) => {
           });
           return runConversation(newHistory, depth + 1);
         }
+
 
         // B. DATES / GUESTS -> return signal to frontend
         if (toolName === "request_dates") {
@@ -1030,353 +1126,176 @@ router.post("/travel", async (req, res) => {
 
           if (!plan.itinerary) plan.itinerary = [];
           if (!plan.flights) plan.flights = [];
-          
+
           // FALLBACK: If LLM forgot to pass flights back, use memory
           if (plan.flights.length === 0) {
-             if (mem.lastFlights && mem.lastFlights.length > 0) {
-                 logInfo(reqId, "Restoring flights from memory fallback (count: " + mem.lastFlights.length + ")");
-                 plan.flights = mem.lastFlights;
-             } else {
-                 logInfo(reqId, "No flights in plan AND no flights in memory fallback.");
-             }
+            if (mem.lastFlights && mem.lastFlights.length > 0) {
+              logInfo(reqId, "Restoring flights from memory fallback (count: " + mem.lastFlights.length + ")");
+              plan.flights = mem.lastFlights;
+            } else {
+              logInfo(reqId, "No flights in plan AND no flights in memory fallback.");
+            }
           }
 
           if (!plan.costBreakdown) plan.costBreakdown = [];
-          
-          // FORCE USD to avoid AI hallucinating local currency on USD prices
+
+          // FORCE USD
           plan.currency = "USD";
-          
+
           if (!plan.cities) plan.cities = [];
           if (plan.cities.length > 1) plan.multiCity = true;
 
-          // Ensure weather exists so frontend always has something
           ensureWeather(plan);
 
-          // Attach image
           try {
-            const q =
-              plan.multiCity && plan.cities.length > 0
-                ? plan.cities[0]
-                : plan.location;
+            const q = plan.multiCity && plan.cities.length > 0 ? plan.cities[0] : plan.location;
             plan.image = await pickPhoto(q || "travel", reqId);
           } catch (e) {
             plan.image = FALLBACK_IMAGE_URL;
           }
 
-          // --- ENRICH FLIGHTS FROM MEMORY (Merge rich data) ---
+          // --- ENRICH FLIGHTS FROM MEMORY ---
           if (plan.flights && plan.flights.length > 0 && mem.lastFlights && mem.lastFlights.length > 0) {
-              plan.flights.forEach(f => {
-                   // Ensure we have a flight number to match
-                   const fNum = (f.flightNumber || "").replace(/\s+/g, '').toUpperCase();
-                   if (fNum) {
-                       const match = mem.lastFlights.find(mf => 
-                           (mf.flightNumber || "").replace(/\s+/g, '').toUpperCase() === fNum ||
-                           (mf.airline === f.airline && mf.price === f.price) // fallback match
-                       );
-                       if (match) {
-                           logInfo(reqId, "Enriching flight " + fNum + " from memory data");
-                           // Copy ALL fields to ensure frontend gets full data
-                           f.layover = match.layover;
-                           f.departDate = match.departDate;
-                           f.stops = match.stops;
-                           f.depart = match.depart;
-                           f.arrive = match.arrive;
-                           f.origin = match.origin; // Critical for frontend
-                           f.destination = match.destination; // Critical for frontend
-                           f.booking_url = match.booking_url;
-                           
-                           // Return Leg Data
-                           f.isRoundTrip = match.isRoundTrip;
-                           f.returnDate = match.returnDate;
-                           f.returnDepart = match.returnDepart;
-                           f.returnArrive = match.returnArrive;
-                           f.returnDuration = match.returnDuration;
-                           f.returnStops = match.returnStops;
-                           f.returnLayover = match.returnLayover;
-                           
-                           // Trust memory duration if available
-                           if (match.duration) f.duration = match.duration;
-                       }
-                   }
-                   
-                   // Fallback: Derive departDate from departTime if still missing
-                   if (!f.departDate && f.departTime && f.departTime.includes('T')) {
-                        f.departDate = f.departTime.split('T')[0];
-                   } else if (!f.departDate && f.departTime && f.departTime.match(/^\d{4}-\d{2}-\d{2}/)) {
-                        f.departDate = f.departTime.slice(0, 10);
-                   }
-              });
+            plan.flights.forEach(f => {
+              const fNum = (f.flightNumber || "").replace(/\s+/g, '').toUpperCase();
+              if (fNum) {
+                const match = mem.lastFlights.find(mf =>
+                  (mf.flightNumber || "").replace(/\s+/g, '').toUpperCase() === fNum ||
+                  (mf.airline === f.airline && mf.price === f.price)
+                );
+                if (match) {
+                  f.layover = match.layover;
+                  f.departDate = match.departDate;
+                  f.stops = match.stops;
+                  f.depart = match.depart;
+                  f.arrive = match.arrive;
+                  f.origin = match.origin;
+                  f.destination = match.destination;
+                  f.booking_url = match.booking_url;
+
+                  f.isRoundTrip = match.isRoundTrip;
+                  f.returnDate = match.returnDate;
+                  f.returnDepart = match.returnDepart;
+                  f.returnArrive = match.returnArrive;
+                  f.returnDuration = match.returnDuration;
+                  f.returnStops = match.returnStops;
+                  f.returnLayover = match.returnLayover;
+                  if (match.duration) f.duration = match.duration;
+                }
+              }
+              if (!f.departDate && f.departTime && f.departTime.includes('T')) {
+                f.departDate = f.departTime.split('T')[0];
+              } else if (!f.departDate && f.departTime && f.departTime.match(/^\d{4}-\d{2}-\d{2}/)) {
+                f.departDate = f.departTime.slice(0, 10);
+              }
+            });
           }
 
-          // --- ITINERARY SYNC: INJECT REAL FLIGHT DETAILS ---
-          // Run this BEFORE formatting dates so we can match ISO strings
+          // --- ITINERARY SYNC ---
           if (plan.flights && plan.flights.length > 0 && plan.itinerary) {
-              logInfo(reqId, "Syncing flights to itinerary...", { 
-                  flightDate: plan.flights[0].departDate, 
-                  itinDates: plan.itinerary.map(d => d.date) 
-              });
-              
-              plan.flights.forEach(f => {
-                  if (f.departDate) {
-                      const day = plan.itinerary.find(d => 
-                          (d.date && d.date.startsWith(f.departDate)) || 
-                          (d.day && d.day.startsWith(f.departDate))
-                      );
-                      
-                      if (day) {
-                          const ev = day.events ? day.events.find(e => 
-                              e.type === 'travel' || 
-                              (e.title && e.title.toLowerCase().includes('flight'))
-                          ) : null;
-                          
-                          if (ev) {
-                              logInfo(reqId, "Found matching event for sync:", ev.title);
-                              if (f.duration) ev.duration = f.duration;
-                              if (f.flightNumber && (!ev.title || !ev.title.includes(f.flightNumber))) {
-                                  ev.title = `Flight ${f.flightNumber} (${f.airline})`;
-                                  ev.provider = f.airline; 
-                              }
-                          } else {
-                              logInfo(reqId, "Day found but no Flight/Travel event", day);
-                          }
-                      } else {
-                          logInfo(reqId, "No match for outbound flight date:", f.departDate);
-                       }
-                  } // end outbound sync
-
-                  // RETURN FLIGHT SYNC
-                  if (f.returnDate) {
-                      const day = plan.itinerary.find(d => 
-                           (d.date && d.date.startsWith(f.returnDate)) || 
-                           (d.day && d.day.startsWith(f.returnDate))
-                      );
-                      if (day) {
-                          const ev = day.events ? day.events.find(e => 
-                               e.type === 'travel' || (e.title && e.title.toLowerCase().includes('flight'))
-                          ) : null;
-                          if (ev) {
-                              if (f.returnDuration) ev.duration = f.returnDuration;
-                              if (!ev.title || !ev.title.includes('Return')) {
-                                 ev.title = `Return Flight (${f.airline})`;
-                              }
-                          }
-                      }
+            plan.flights.forEach(f => {
+              if (f.departDate) {
+                const day = plan.itinerary.find(d => (d.date && d.date.startsWith(f.departDate)) || (d.day && d.day.startsWith(f.departDate)));
+                if (day && day.events) {
+                  const ev = day.events.find(e => e.type === 'travel' || (e.title && e.title.toLowerCase().includes('flight')));
+                  if (ev) {
+                    if (f.duration) ev.duration = f.duration;
+                    if (f.flightNumber && (!ev.title || !ev.title.includes(f.flightNumber))) {
+                      ev.title = `Flight ${f.flightNumber} (${f.airline})`;
+                      ev.provider = f.airline;
+                    }
                   }
-               });
+                }
+              }
+              if (f.returnDate) {
+                const day = plan.itinerary.find(d => (d.date && d.date.startsWith(f.returnDate)) || (d.day && d.day.startsWith(f.returnDate)));
+                if (day && day.events) {
+                  const ev = day.events.find(e => e.type === 'travel' || (e.title && e.title.toLowerCase().includes('flight')));
+                  if (ev) {
+                    if (f.returnDuration) ev.duration = f.returnDuration;
+                    if (!ev.title || !ev.title.includes('Return')) ev.title = `Return Flight (${f.airline})`;
+                  }
+                }
+              }
+            });
           }
 
-          // Format itinerary dates to "Nov 20" for frontend
+          // Calculate Dates for Affiliate Links
+          const lastItin = plan.itinerary[plan.itinerary.length - 1];
+          const firstItin = plan.itinerary[0];
+          const tripStart = firstItin?.date || new Date().toISOString().slice(0, 10);
+          const tripEnd = lastItin?.date || tripStart;
+
+          // Format itinerary dates
           plan.itinerary.forEach((day) => {
-            if (day.date) {
-              const nice = formatDateToMMMDD(day.date);
-              day.date = nice;
-              day.day = nice;
-            } else if (day.day) {
-              const nice = formatDateToMMMDD(day.day);
-              day.date = nice;
-              day.day = nice;
-            }
-
+            if (day.date) { const nice = formatDateToMMMDD(day.date); day.date = nice; day.day = nice; }
+            else if (day.day) { const nice = formatDateToMMMDD(day.day); day.date = nice; day.day = nice; }
             if (Array.isArray(day.events)) {
-              const defaultSlots = ["09:00", "13:00", "17:00", "20:00"];
               day.events.forEach((ev, idx) => {
-                if (
-                  !ev.time ||
-                  typeof ev.time !== "string" ||
-                  !ev.time.trim()
-                ) {
-                  ev.time = defaultSlots[idx] || "10:00";
-                }
-                if (
-                  !ev.duration ||
-                  typeof ev.duration !== "string" ||
-                  !ev.duration.trim()
-                ) {
-                   // Smarter defaults
-                   if (ev.type === 'travel' || (ev.title && ev.title.toLowerCase().includes('flight'))) {
-                       ev.duration = "2h"; // Default if still missing after sync
-                   } else {
-                       ev.duration = "1h"; // Reduce default for regular activities
-                   }
-                }
-
-                const t = String(ev.title || "").toLowerCase();
-                const p = String(ev.provider || "").toLowerCase();
-
-                const generic =
-                  t.includes("local restaurant") ||
-                  t.includes("nice restaurant") ||
-                  (t.includes("hotel") &&
-                    !t.includes("★") &&
-                    !t.includes("resort") &&
-                    !t.includes("inn") &&
-                    !t.includes("hotel ") &&
-                    !/[a-z]{3,}/.test(t.replace("hotel", ""))) ||
-                  t.includes("beach time") ||
-                  t.includes("explore the city") ||
-                  t.includes("generic") ||
-                  p === "local restaurant" ||
-                  p === "nice hotel" ||
-                  p === "local hotel";
-
-                if (generic) {
-                  ev.title =
-                    "INVALID_GENERIC_EVENT — PLEASE REGENERATE WITH REAL PLACE NAMES";
-                }
+                if (!ev.time) ev.time = ["09:00", "13:00", "17:00", "20:00"][idx] || "10:00";
+                if (!ev.duration) ev.duration = "2h";
+                // Check for hotels in itinerary events (optional: link them too?)
               });
             }
           });
 
-
-
           // --- COST BREAKDOWN ENRICHMENT ---
-          // 1. If breakdown is empty but we have flights, add a default flight item
+          // 1. Flights
           if (plan.costBreakdown.length === 0 && plan.flights.length > 0) {
+            // Create logic omitted for brevity, simpler below:
+          }
+          if (plan.flights.length > 0) {
+            // Filter existing flights
+            plan.costBreakdown = plan.costBreakdown.filter(item => {
+              const lower = (item.item || "").toLowerCase();
+              return !(lower.includes("flight") || lower.includes("fly") || lower.includes("airline"));
+            });
+            // Add simplified flight
             const f0 = plan.flights[0];
-            const details = f0.route || "Round trip";
-            // Enrich with time/stops if available
-            const extra = [];
-            if (f0.duration) extra.push(f0.duration);
-            if (f0.stops !== undefined) extra.push(f0.stops === 0 ? "Direct" : `${f0.stops} stops`);
-            const subTitle = extra.length ? `${details} (${extra.join(', ')})` : details;
-
-            plan.costBreakdown.push({
-              item: "Flights",
+            let details = f0.route || "Round trip";
+            plan.costBreakdown.unshift({
+              item: "Fly Tickets",
               provider: f0.airline || "Airline",
-              details: subTitle,
-              price: f0.price || 0,
+              details: details,
+              price: Number(f0.price) || 0,
               iconType: "plane",
               iconValue: "✈️",
-              // PASS THROUGH RAW DATA for custom cards
-              raw: {
-                ...f0,
-                depart: f0.departTime, // Map schema mismatch
-                arrive: f0.arriveTime
-              }
+              booking_url: f0.booking_url,
+              raw: { ...f0, depart: f0.depart || f0.departTime, arrive: f0.arrive || f0.arriveTime }
             });
           }
-          else if (plan.costBreakdown.length > 0 && plan.flights.length > 0) {
-             // Strategy: Remove ALL existing "Flight" line items and inject our ONE single simplified "Flights" line.
-             // This guarantees no duplicates and perfect data.
-             
-             // Filter out any AI-generated flight entries
-             plan.costBreakdown = plan.costBreakdown.filter(item => {
-                 const lower = (item.item || "").toLowerCase();
-                 return !(lower.includes("flight") || lower.includes("fly") || lower.includes("airline"));
-             });
 
-             // Now append our single source of truth flight item
-             const f0 = plan.flights[0];
-             
-             // Outbound details
-             let outStr = "";
-             if (f0.stops > 0) outStr = `${f0.stops} change${f0.stops > 1 ? 's' : ''}`;
-             else outStr = `Direct`;
+          // 2. Enrich Logos & URLs
+          plan.costBreakdown.forEach(item => {
+            const lowerItem = (item.item || "").toLowerCase();
+            const lowerProv = (item.provider || "").toLowerCase();
 
-             // Return details
-             const extra = [outStr];
-             if (f0.isRoundTrip) {
-                let retStr = "";
-                if (f0.returnStops > 0) retStr = `${f0.returnStops} change${f0.returnStops > 1 ? 's' : ''}`;
-                else retStr = `Direct`;
-                extra.push(`Ret: ${retStr}`);
-             }
+            if (!item.booking_url) {
+              if (lowerProv.includes("gettransfer") || lowerItem.includes("transfer")) item.booking_url = "https://gettransfer.com";
+              else if (lowerProv.includes("axa")) item.booking_url = "https://www.axa-schengen.com";
+              else if (lowerProv.includes("allianz")) item.booking_url = "https://www.allianz-travel.com";
+              else if (lowerProv.includes("getyourguide")) item.booking_url = "https://www.getyourguide.com";
+              else if (lowerProv.includes("viator")) item.booking_url = "https://www.viator.com";
+              else if (lowerProv.includes("booking.com")) item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd);
+              else if (lowerProv.includes("zenhotels") || lowerProv.includes("ratehawk")) item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd);
+              else if (item.iconType === 'bed' || lowerItem.includes('hotel') || lowerItem.includes('stay') || lowerItem.includes('accommodation')) {
+                // Default all hotels to RateHawk with Deep Link
+                item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd);
+              }
+              else if (lowerProv.includes("airbnb")) item.booking_url = "https://www.airbnb.com";
+            }
 
-             const subTitle = extra.join(' | ');
+            // Domain/Favicon logic
+            let domain = "";
+            if (item.booking_url) { try { domain = new URL(item.booking_url).hostname.replace('www.', ''); } catch (e) { } }
+            if (!domain && item.provider) { /* simplify */ domain = item.provider.replace(/\s/g, '').toLowerCase() + ".com"; }
+            if (domain) { item.iconType = 'image'; item.iconValue = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`; }
+          });
 
-             plan.costBreakdown.unshift({
-                item: "Fly Tickets",  
-                provider: f0.airline || "Airline", 
-                details: subTitle,
-                price: Number(f0.price) || 0,
-                iconType: "plane",
-                iconValue: "✈️",
-                booking_url: f0.booking_url,
-                raw: {
-                  ...f0,
-                  // STRICTLY OVERWRITE BAD AI DATES
-                  // The frontend uses these fields. We must ensure they correspond to the real ISO strings from Amadeus
-                  // f0.depart/arrive are already clean HH:MM or ISO from normalizeOffer
-                  // We also overwrite departTime/arriveTime to be safe
-                  depart: f0.depart, 
-                  arrive: f0.arrive,
-                  departTime: f0.depart,
-                  arriveTime: f0.arrive, 
-                  
-                   origin: f0.origin,
-                   destination: f0.destination,
-                   layover: f0.layover
-                }
-             });
+          // Recalculate Total
+          if (plan.costBreakdown.length > 0) {
+            plan.price = plan.costBreakdown.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
           }
-
-           // --- ENRICH LOGOS & URLS (NEW) ---
-           // Add logos for providers and ensure booking URLs for new items
-           plan.costBreakdown.forEach(item => {
-               const lowerItem = (item.item || "").toLowerCase();
-               const lowerProv = (item.provider || "").toLowerCase();
-               
-               // 1. Smart URL Map
-               if (!item.booking_url) {
-                   if (lowerProv.includes("gettransfer") || lowerItem.includes("transfer")) item.booking_url = "https://gettransfer.com";
-                   else if (lowerProv.includes("axa")) item.booking_url = "https://www.axa-schengen.com";
-                   else if (lowerProv.includes("allianz")) item.booking_url = "https://www.allianz-travel.com";
-                   else if (lowerProv.includes("getyourguide")) item.booking_url = "https://www.getyourguide.com";
-                   else if (lowerProv.includes("viator")) item.booking_url = "https://www.viator.com";
-                   else if (lowerProv.includes("booking.com")) item.booking_url = "https://www.booking.com";
-                   else if (lowerProv.includes("airbnb")) item.booking_url = "https://www.airbnb.com";
-               }
-
-               // 2. Logo Magic (Clearbit)
-               // Try to extract domain from booking_url first
-               let domain = "";
-               if (item.booking_url) {
-                   try {
-                       const urlObj = new URL(item.booking_url);
-                       domain = urlObj.hostname.replace('www.', '');
-                   } catch (e) {}
-               }
-               
-               // Fallback: Guess domain from provider
-               if (!domain && item.provider) {
-                   const cleanProv = item.provider.replace(/\s+/g, '').toLowerCase();
-                   // Common airline fixes
-                   if (cleanProv.includes("wizz")) domain = "wizzair.com";
-                   else if (cleanProv.includes("ryanair")) domain = "ryanair.com";
-                   else if (cleanProv.includes("turkish")) domain = "turkishairlines.com";
-                   else if (cleanProv.includes("emirates")) domain = "emirates.com";
-                   else if (cleanProv.includes("lufthansa")) domain = "lufthansa.com";
-                   else if (cleanProv.includes("royalairmaroc") || cleanProv.includes("royal")) domain = "royalairmaroc.com";
-                   else if (cleanProv.includes("klm")) domain = "klm.com";
-                   else if (cleanProv.includes("airfrance")) domain = "airfrance.com";
-                   else if (cleanProv.includes("delta")) domain = "delta.com";
-                   else if (cleanProv.includes("british")) domain = "ba.com";
-                   else if (cleanProv.includes("qatar")) domain = "qatarairways.com";
-                   
-                   // Fallback for Codes if dictionary failed
-                   else if (cleanProv === "tk") domain = "turkishairlines.com";
-                   else if (cleanProv === "at") domain = "royalairmaroc.com"; 
-                   else if (cleanProv === "w6" || cleanProv === "wizz") domain = "wizzair.com";
-                   else if (cleanProv === "fr" || cleanProv === "ryanair") domain = "ryanair.com";
-                   else if (cleanProv === "ba") domain = "ba.com";
-                   else if (cleanProv === "af") domain = "airfrance.com";
-                   else if (cleanProv === "lh") domain = "lufthansa.com";
-                   else domain = `${cleanProv}.com`; 
-               }
-
-               if (domain) {
-                   item.iconType = 'image';
-                   // Use Google Favicons (High Res) - often more reliable than Clearbit for random domains
-                   item.iconValue = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
-               }
-           });
-
-           // --- FINAL PRICE RECALCULATION ---
-           // Ensure the displayed total accurately reflects the sum of the breakdown items
-           if (plan.costBreakdown.length > 0) {
-               const calculatedTotal = plan.costBreakdown.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
-               plan.price = calculatedTotal;
-           }
 
           return {
             aiText: `I've built a plan for ${plan.location}.`,

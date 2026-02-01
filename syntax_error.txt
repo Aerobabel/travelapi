@@ -1,0 +1,8 @@
+C:\Users\macmi\OneDrive\Desktop\NuviaV1\travelapi_backend\chat.routes.js:166
+  return {
+  ^^^^^^
+
+SyntaxError: Illegal return statement
+    at checkSyntax (node:internal/main/check_syntax:74:5)
+
+Node.js v20.15.1
