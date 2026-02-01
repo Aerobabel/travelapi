@@ -366,8 +366,8 @@ const getZenHotelsLink = (city, checkIn, checkOut, hotelName, hotelId) => {
 
 // IMPROVED getZenHotelsLink with Search capability if possible
 // IMPROVED getZenHotelsLink with Search capability
-const createAffiliateLink = (overrides = {}, hotelName = "", checkIn = null, checkOut = null) => {
-  const base = "https://www.zenhotels.com/";
+const createAffiliateLink = (overrides = {}, hotelName = "", checkIn = null, checkOut = null, city = "", guests = 2) => {
+  const base = "https://www.zenhotels.com/hotels/";
 
   // Base Params
   const params = new URLSearchParams({
@@ -382,17 +382,23 @@ const createAffiliateLink = (overrides = {}, hotelName = "", checkIn = null, che
     ...overrides
   });
 
-  // 1. Add Query (Hotel Name + City or just Hotel Name)
-  if (hotelName) {
-    params.append('q', hotelName);
-  }
-
-  // 2. Add Dates (checkin/checkout)
+  // 1. Add Dates (checkin/checkout)
   if (checkIn) params.append('checkin', checkIn);
   if (checkOut) params.append('checkout', checkOut);
 
-  // 3. Default Guests
-  params.append('adults', '1');
+  // 2. Default Guests
+  params.append('adults', String(guests || 2));
+  params.append('children', '0');
+
+  // 3. Search Query Logic
+  // If we have a city, we can try to append it to the query or use it for context
+  let query = hotelName;
+  if (city && !hotelName.toLowerCase().includes(city.toLowerCase())) {
+    query = `${hotelName} ${city}`;
+  }
+  if (query) {
+    params.append('q', query);
+  }
 
   return `${base}?${params.toString()}`;
 }
@@ -444,7 +450,7 @@ async function performGoogleSearch(rawQuery, reqId) {
         total_rate: p.total_rate?.lowest || p.rate_per_night?.lowest,
         rating: p.overall_rating,
         description: p.description,
-        link: p.link,
+        link: createAffiliateLink({}, p.name, null, null, loc), // Use location from query as city context
         latitude: p.gps_coordinates?.latitude,
         longitude: p.gps_coordinates?.longitude,
       }));
@@ -1081,7 +1087,7 @@ router.post("/travel", async (req, res) => {
                     const price = h.offers?.[0]?.price?.total;
                     const name = h.hotel?.name;
                     // Affiliate Link with Deep Link
-                    const affLink = createAffiliateLink({}, name, args.checkIn, args.checkOut);
+                    const affLink = createAffiliateLink({}, name, args.checkIn, args.checkOut, args.city);
                     return `Hotel ${name} (${h.hotel?.hotelId}): $${price} total. Book here: ${affLink}`;
                   }).join('\n');
                 }
@@ -1276,11 +1282,11 @@ router.post("/travel", async (req, res) => {
               else if (lowerProv.includes("allianz")) item.booking_url = "https://www.allianz-travel.com";
               else if (lowerProv.includes("getyourguide")) item.booking_url = "https://www.getyourguide.com";
               else if (lowerProv.includes("viator")) item.booking_url = "https://www.viator.com";
-              else if (lowerProv.includes("booking.com")) item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd);
-              else if (lowerProv.includes("zenhotels") || lowerProv.includes("ratehawk")) item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd);
+              else if (lowerProv.includes("booking.com")) item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd, plan.location);
+              else if (lowerProv.includes("zenhotels") || lowerProv.includes("ratehawk")) item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd, plan.location);
               else if (item.iconType === 'bed' || lowerItem.includes('hotel') || lowerItem.includes('stay') || lowerItem.includes('accommodation')) {
                 // Default all hotels to RateHawk with Deep Link
-                item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd);
+                item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd, plan.location);
               }
               else if (lowerProv.includes("airbnb")) item.booking_url = "https://www.airbnb.com";
             }
