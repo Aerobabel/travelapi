@@ -367,7 +367,7 @@ const getZenHotelsLink = (city, checkIn, checkOut, hotelName, hotelId) => {
 // IMPROVED getZenHotelsLink with Search capability if possible
 // IMPROVED getZenHotelsLink with Search capability
 const createAffiliateLink = (overrides = {}, hotelName = "", checkIn = null, checkOut = null, city = "", guests = 2) => {
-  const base = "https://www.zenhotels.com/hotels/";
+  const base = "https://www.zenhotels.com/";
 
   // Base Params
   const params = new URLSearchParams({
