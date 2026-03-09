@@ -36,6 +36,23 @@ const amadeus = new Amadeus({
 
 const SERPAPI_KEY = process.env.SERPAPI_API_KEY;
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
+const RATEHAWK_BASE_URL = (
+  process.env.RATEHAWK_API_BASE_URL || "https://api.worldota.net/api/b2b/v3"
+).replace(/\/+$/, "");
+const RATEHAWK_KEY_ID = process.env.RATEHAWK_KEY_ID || "";
+const RATEHAWK_API_KEY = process.env.RATEHAWK_API_KEY || "";
+const RATEHAWK_KEY_TYPE = String(process.env.RATEHAWK_KEY_TYPE || "").trim().toLowerCase();
+const RATEHAWK_TIMEOUT_MS = Number(process.env.RATEHAWK_TIMEOUT_MS || 4500);
+
+const ZEN_PARTNER_SLUG = process.env.ZEN_PARTNER_SLUG || "285572.affiliate.37e8";
+const ZEN_UTM_CAMPAIGN = process.env.ZEN_UTM_CAMPAIGN || "en-en, deeplink, affiliate";
+const ZEN_UTM_MEDIUM = process.env.ZEN_UTM_MEDIUM || "api2";
+const ZEN_UTM_SOURCE = process.env.ZEN_UTM_SOURCE || ZEN_PARTNER_SLUG;
+const ZEN_UTM_TERM = process.env.ZEN_UTM_TERM || "None";
+const ZEN_LANG = process.env.ZEN_LANG || "en";
+const ZEN_CURRENCY = process.env.ZEN_CURRENCY || "USD";
+const ZEN_PARTNER_EXTRA = process.env.ZEN_PARTNER_EXTRA || "None";
+const ZEN_GUESTS_DEFAULT = process.env.ZEN_GUESTS_DEFAULT || "2";
 
 const newReqId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -310,97 +327,217 @@ function ensureWeather(plan) {
 }
 
 // --- 2.1 AFFILIATE HELPERS ------------------------------------------------
-const getZenHotelsLink = (city, checkIn, checkOut, hotelName, hotelId) => {
-  // Base Affiliate Params
-  const PARTNER_SLUG = "285572.affiliate.37e8";
-  const UTM_PARAMS = `utm_campaign=en-en%2C+deeplink%2C+affiliate&utm_medium=api2&utm_source=${PARTNER_SLUG}&utm_term=None`;
+const sanitizeText = (val) => String(val || "").trim();
 
-  // Default values
-  const today = new Date();
-  const nextMonth = new Date(today); nextMonth.setMonth(today.getMonth() + 1);
-  const nextMonthPlus3 = new Date(nextMonth); nextMonthPlus3.setDate(nextMonth.getDate() + 3);
+function formatZenDate(input) {
+  const raw = sanitizeText(input);
+  if (!raw) return null;
 
-  const cIn = checkIn || nextMonth.toISOString().slice(0, 10);
-  const cOut = checkOut || nextMonthPlus3.toISOString().slice(0, 10);
+  if (/^\d{2}\.\d{2}\.\d{4}$/.test(raw)) return raw;
 
-  const baseUrl = "https://www.zenhotels.com/hotels";
-  let finalUrl = `${baseUrl}/?checkin=${cIn}&checkout=${cOut}&adults=1&children=0&currency=USD&lang=en&partner_extra=None&partner_slug=${PARTNER_SLUG}&${UTM_PARAMS}`;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  return `${dd}.${mm}.${yyyy}`;
+}
 
-  // If we have a specific hotel ID from a previous search (Amadeus), we might be able to map it, 
-  // but Amadeus IDs don't map to ZenHotels IDs directly. 
-  // Best bet: Search by destination (city).
+function formatZenDateRange(checkIn, checkOut) {
+  const start = formatZenDate(checkIn);
+  const end = formatZenDate(checkOut);
+  if (!start || !end) return null;
+  return `${start}-${end}`;
+}
 
-  if (city) {
-    // Slugify city name: "New York" -> "new_york"
-    const slug = city.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-    // ZenHotels structure: https://www.zenhotels.com/hotels/united_states_of_america/new_york/
-    // It's safer to use the query param search if we don't have the exact geo-slug.
-    // But the main page link they gave us is query based.
+function normalizeZenGuests(guests = ZEN_GUESTS_DEFAULT) {
+  const g = sanitizeText(guests);
+  if (!g) return ZEN_GUESTS_DEFAULT;
+  // Keep official format: "2", "2-2", "2and9", "2and9.12-2"
+  if (/^\d+(and\d+(?:\.\d+)*)?(?:-\d+(and\d+(?:\.\d+)*)?)*$/.test(g)) return g;
+  const numeric = Number(g);
+  if (Number.isFinite(numeric) && numeric > 0) return String(Math.floor(numeric));
+  return ZEN_GUESTS_DEFAULT;
+}
 
-    // Let's try to pass the destination in q if possible, or just default to main page 
-    // with the affiliate parameters. 
-    // Actually, standard deep link construction for ZenHotels/RateHawk often requires known region IDs.
-    // WITHOUT region IDs, the safest fallback is the main page or using a search query param if supported.
-    // Looking at their URL structure, they handle destination via path /hotels/region/city/
+function buildZenParams({ checkIn, checkOut, guests, lang, cur, partnerExtra }) {
+  const params = new URLSearchParams({
+    cur: cur || ZEN_CURRENCY,
+    lang: lang || ZEN_LANG,
+    guests: normalizeZenGuests(guests),
+    partner_slug: ZEN_PARTNER_SLUG,
+    utm_campaign: ZEN_UTM_CAMPAIGN,
+    utm_medium: ZEN_UTM_MEDIUM,
+    utm_source: ZEN_UTM_SOURCE,
+    utm_term: ZEN_UTM_TERM,
+    partner_extra: sanitizeText(partnerExtra) || ZEN_PARTNER_EXTRA,
+  });
+  const dates = formatZenDateRange(checkIn, checkOut);
+  if (dates) params.set("dates", dates);
+  return params;
+}
 
-    // FALLBACK STRATEGY: 
-    // Return the main affiliate link. The user will have to type the city. 
-    // OR, we can try to guess the slug: /hotels/world/ (too risky).
+function getRateHawkAuthHeaders() {
+  const mode = RATEHAWK_KEY_TYPE;
 
-    // Wait, let's use the exact link format the user provided, but maybe we can append a destination?
-    // ZenHotels doesn't seem to support `?destination=paris` easily without internal IDs.
-    // HOWEVER, we can stick to providing the monetized link to the HOME PAGE.
-    // BUT even better: "Hotel Name" search.
+  if (mode === "basic") {
+    if (!RATEHAWK_KEY_ID || !RATEHAWK_API_KEY) return null;
+    const token = Buffer.from(`${RATEHAWK_KEY_ID}:${RATEHAWK_API_KEY}`).toString("base64");
+    return { Authorization: `Basic ${token}` };
   }
 
-  // If we have a specific hotel name, we can try to deep link to a search for that hotel?
-  // ZenHotels doesn't support "search?q=HotelName" easily.
+  if (mode === "x-api-key" || mode === "x_api_key" || mode === "api_key") {
+    if (!RATEHAWK_API_KEY) return null;
+    return { "X-API-KEY": RATEHAWK_API_KEY };
+  }
 
-  // SAFE IMPLEMENTATION:
-  // 1. If we found a hotel via Amadeus, we have a name.
-  // We can't deep link to it reliably on Zen without their ID.
-  // 2. We will provide the General Affiliate Link.
+  if (mode === "bearer") {
+    if (!RATEHAWK_API_KEY) return null;
+    return { Authorization: `Bearer ${RATEHAWK_API_KEY}` };
+  }
 
-  return finalUrl;
-};
+  // Auto-detect if key type is not explicitly set.
+  if (RATEHAWK_KEY_ID && RATEHAWK_API_KEY) {
+    const token = Buffer.from(`${RATEHAWK_KEY_ID}:${RATEHAWK_API_KEY}`).toString("base64");
+    return { Authorization: `Basic ${token}` };
+  }
+  if (RATEHAWK_API_KEY) return { "X-API-KEY": RATEHAWK_API_KEY };
+  return null;
+}
 
-// IMPROVED getZenHotelsLink with Search capability if possible
-// IMPROVED getZenHotelsLink with Search capability
-const createAffiliateLink = (overrides = {}, hotelName = "", checkIn = null, checkOut = null, city = "", guests = 2) => {
-  const base = "https://www.zenhotels.com/";
+async function fetchRateHawkMulticomplete(query, reqId) {
+  const authHeaders = getRateHawkAuthHeaders();
+  const q = sanitizeText(query);
+  if (!authHeaders || !q) return null;
 
-  // Base Params
-  const params = new URLSearchParams({
-    cur: "USD",
-    lang: "en",
-    partner_extra: "None",
-    partner_slug: "285572.affiliate.37e8",
-    utm_campaign: "en-en, deeplink, affiliate",
-    utm_medium: "api2",
-    utm_source: "285572.affiliate.37e8",
-    utm_term: "None",
-    ...overrides
+  const url = `${RATEHAWK_BASE_URL}/search/multicomplete/`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RATEHAWK_TIMEOUT_MS);
+
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      body: JSON.stringify({
+        query: q,
+        language: ZEN_LANG,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!r.ok) {
+      const raw = await r.text().catch(() => "");
+      logError(reqId || "n/a", `[RateHawk multicomplete ${r.status}]`, raw.slice(0, 200));
+      return null;
+    }
+    return await r.json();
+  } catch (e) {
+    logError(reqId || "n/a", "RateHawk multicomplete failed", e?.message || e);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function extractZenIds(payload = {}) {
+  const hotels =
+    payload?.hotels ||
+    payload?.result?.hotels ||
+    payload?.data?.hotels ||
+    [];
+  const regions =
+    payload?.regions ||
+    payload?.result?.regions ||
+    payload?.data?.regions ||
+    [];
+
+  const firstHotel = Array.isArray(hotels) ? hotels[0] : null;
+  const firstRegion = Array.isArray(regions) ? regions[0] : null;
+
+  const hotelId =
+    firstHotel?.id ||
+    firstHotel?.hotel_id ||
+    firstHotel?.hotelId ||
+    firstHotel?.hid ||
+    null;
+
+  const regionId =
+    firstHotel?.region_id ||
+    firstHotel?.regionId ||
+    firstHotel?.region?.id ||
+    firstRegion?.id ||
+    firstRegion?.region_id ||
+    firstRegion?.regionId ||
+    null;
+
+  return {
+    hotelId: hotelId ? String(hotelId) : null,
+    regionId: regionId ? String(regionId) : null,
+  };
+}
+
+async function resolveZenIds({ hotelName = "", city = "", reqId } = {}) {
+  const tries = [];
+  const name = sanitizeText(hotelName);
+  const place = sanitizeText(city);
+  if (name && place) tries.push(`${name} ${place}`);
+  if (name) tries.push(name);
+  if (place) tries.push(place);
+
+  for (const q of tries) {
+    const payload = await fetchRateHawkMulticomplete(q, reqId);
+    if (!payload) continue;
+    const ids = extractZenIds(payload);
+    if (ids.hotelId || ids.regionId) return ids;
+  }
+  return { hotelId: null, regionId: null };
+}
+
+function buildZenSerpUrl(regionId, params) {
+  const p = new URLSearchParams(params.toString());
+  p.set("q", String(regionId));
+  return `https://www.zenhotels.com/hotels/?${p.toString()}`;
+}
+
+function buildZenHotelUrl(hotelId, params) {
+  return `https://www.zenhotels.com/rooms/${encodeURIComponent(String(hotelId))}/?${params.toString()}`;
+}
+
+async function createAffiliateLink({
+  hotelName = "",
+  city = "",
+  checkIn = null,
+  checkOut = null,
+  guests = ZEN_GUESTS_DEFAULT,
+  hotelId = null,
+  regionId = null,
+  partnerExtra = ZEN_PARTNER_EXTRA,
+  reqId = null,
+} = {}) {
+  const params = buildZenParams({
+    checkIn,
+    checkOut,
+    guests,
+    partnerExtra,
   });
 
-  // 1. Add Dates (checkin/checkout)
-  if (checkIn) params.append('checkin', checkIn);
-  if (checkOut) params.append('checkout', checkOut);
+  let resolvedHotelId = hotelId ? String(hotelId) : null;
+  let resolvedRegionId = regionId ? String(regionId) : null;
 
-  // 2. Default Guests
-  params.append('adults', String(guests || 2));
-  params.append('children', '0');
-
-  // 3. Search Query Logic
-  // If we have a city, we can try to append it to the query or use it for context
-  let query = hotelName;
-  if (city && !hotelName.toLowerCase().includes(city.toLowerCase())) {
-    query = `${hotelName} ${city}`;
-  }
-  if (query) {
-    params.append('q', query);
+  if (!resolvedHotelId && !resolvedRegionId) {
+    const resolved = await resolveZenIds({ hotelName, city, reqId });
+    resolvedHotelId = resolved.hotelId;
+    resolvedRegionId = resolved.regionId;
   }
 
-  return `${base}?${params.toString()}`;
+  if (resolvedHotelId) return buildZenHotelUrl(resolvedHotelId, params);
+  if (resolvedRegionId) return buildZenSerpUrl(resolvedRegionId, params);
+
+  // Fallback keeps attribution even if destination lookup fails.
+  return `https://www.zenhotels.com/hotels/?${params.toString()}`;
 }
 
 // --- 3. SERPAPI SEARCH LAYER -----------------------------------------------
@@ -445,15 +582,21 @@ async function performGoogleSearch(rawQuery, reqId) {
       )}&currency=USD&api_key=${SERPAPI_KEY}`;
 
       const data = await fetch(url).then((r) => r.json());
-      const results = (data.properties || []).slice(0, 7).map((p) => ({
-        name: p.name,
-        total_rate: p.total_rate?.lowest || p.rate_per_night?.lowest,
-        rating: p.overall_rating,
-        description: p.description,
-        link: createAffiliateLink({}, p.name, null, null, loc), // Use location from query as city context
-        latitude: p.gps_coordinates?.latitude,
-        longitude: p.gps_coordinates?.longitude,
-      }));
+      const results = await Promise.all(
+        (data.properties || []).slice(0, 7).map(async (p) => ({
+          name: p.name,
+          total_rate: p.total_rate?.lowest || p.rate_per_night?.lowest,
+          rating: p.overall_rating,
+          description: p.description,
+          link: await createAffiliateLink({
+            hotelName: p.name,
+            city: loc,
+            reqId,
+          }),
+          latitude: p.gps_coordinates?.latitude,
+          longitude: p.gps_coordinates?.longitude,
+        }))
+      );
       return JSON.stringify(results);
     }
 
@@ -1083,13 +1226,21 @@ router.post("/travel", async (req, res) => {
                   currencyCode: 'USD'
                 });
                 if (data && data.length) {
-                  result = data.slice(0, 5).map(h => {
-                    const price = h.offers?.[0]?.price?.total;
-                    const name = h.hotel?.name;
-                    // Affiliate Link with Deep Link
-                    const affLink = createAffiliateLink({}, name, args.checkIn, args.checkOut, args.city);
-                    return `Hotel ${name} (${h.hotel?.hotelId}): $${price} total. Book here: ${affLink}`;
-                  }).join('\n');
+                  const lines = await Promise.all(
+                    data.slice(0, 5).map(async (h) => {
+                      const price = h.offers?.[0]?.price?.total;
+                      const name = h.hotel?.name;
+                      const affLink = await createAffiliateLink({
+                        hotelName: name,
+                        city: args.city,
+                        checkIn: args.checkIn,
+                        checkOut: args.checkOut,
+                        reqId,
+                      });
+                      return `Hotel ${name} (${h.hotel?.hotelId}): $${price} total. Book here: ${affLink}`;
+                    })
+                  );
+                  result = lines.join('\n');
                 }
               } else {
                 result = "Could not resolve city code.";
@@ -1272,23 +1423,37 @@ router.post("/travel", async (req, res) => {
           }
 
           // 2. Enrich Logos & URLs
-          plan.costBreakdown.forEach(item => {
+          for (const item of plan.costBreakdown) {
             const lowerItem = (item.item || "").toLowerCase();
             const lowerProv = (item.provider || "").toLowerCase();
+            const isAirbnb = lowerProv.includes("airbnb");
+            const isHotelLike =
+              !isAirbnb &&
+              (
+                lowerProv.includes("booking.com") ||
+                lowerProv.includes("zenhotels") ||
+                lowerProv.includes("ratehawk") ||
+                item.iconType === "bed" ||
+                lowerItem.includes("hotel") ||
+                lowerItem.includes("stay") ||
+                lowerItem.includes("accommodation")
+              );
 
-            if (!item.booking_url) {
+            if (isHotelLike) {
+              item.booking_url = await createAffiliateLink({
+                hotelName: item.provider || item.item,
+                city: plan.location,
+                checkIn: tripStart,
+                checkOut: tripEnd,
+                reqId,
+              });
+            } else if (!item.booking_url) {
               if (lowerProv.includes("gettransfer") || lowerItem.includes("transfer")) item.booking_url = "https://gettransfer.com";
               else if (lowerProv.includes("axa")) item.booking_url = "https://www.axa-schengen.com";
               else if (lowerProv.includes("allianz")) item.booking_url = "https://www.allianz-travel.com";
               else if (lowerProv.includes("getyourguide")) item.booking_url = "https://www.getyourguide.com";
               else if (lowerProv.includes("viator")) item.booking_url = "https://www.viator.com";
-              else if (lowerProv.includes("booking.com")) item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd, plan.location);
-              else if (lowerProv.includes("zenhotels") || lowerProv.includes("ratehawk")) item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd, plan.location);
-              else if (item.iconType === 'bed' || lowerItem.includes('hotel') || lowerItem.includes('stay') || lowerItem.includes('accommodation')) {
-                // Default all hotels to RateHawk with Deep Link
-                item.booking_url = createAffiliateLink({}, item.provider, tripStart, tripEnd, plan.location);
-              }
-              else if (lowerProv.includes("airbnb")) item.booking_url = "https://www.airbnb.com";
+              else if (isAirbnb) item.booking_url = "https://www.airbnb.com";
             }
 
             // Domain/Favicon logic
@@ -1296,7 +1461,7 @@ router.post("/travel", async (req, res) => {
             if (item.booking_url) { try { domain = new URL(item.booking_url).hostname.replace('www.', ''); } catch (e) { } }
             if (!domain && item.provider) { /* simplify */ domain = item.provider.replace(/\s/g, '').toLowerCase() + ".com"; }
             if (domain) { item.iconType = 'image'; item.iconValue = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`; }
-          });
+          }
 
           // Recalculate Total
           if (plan.costBreakdown.length > 0) {
