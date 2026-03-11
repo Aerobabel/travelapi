@@ -646,14 +646,14 @@ async function resolveZenIds({ hotelName = "", city = "", reqId } = {}) {
 function buildZenSerpUrl(regionId, params) {
   const p = new URLSearchParams(params.toString());
   p.set("q", String(regionId));
-  return `https://www.zenhotels.com/hotels/?${p.toString()}`;
+  return `https://www.zenhotels.com/?${p.toString()}`;
 }
 
 function buildZenSearchUrl(query, params) {
   const p = new URLSearchParams(params.toString());
   const q = sanitizeText(query);
   if (q) p.set("q", q);
-  return `https://www.zenhotels.com/hotels/?${p.toString()}`;
+  return `https://www.zenhotels.com/?${p.toString()}`;
 }
 
 async function createAffiliateLink({
