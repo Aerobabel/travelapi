@@ -52,7 +52,7 @@ const ZEN_UTM_TERM = process.env.ZEN_UTM_TERM || "None";
 const ZEN_LANG = process.env.ZEN_LANG || "en";
 const ZEN_CURRENCY = process.env.ZEN_CURRENCY || "USD";
 const ZEN_PARTNER_EXTRA = process.env.ZEN_PARTNER_EXTRA || "None";
-const ZEN_GUESTS_DEFAULT = process.env.ZEN_GUESTS_DEFAULT || "2";
+const ZEN_GUESTS_DEFAULT = process.env.ZEN_GUESTS_DEFAULT || "";
 
 const newReqId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -62,6 +62,7 @@ const logError = (id, ...args) => console.error(`[chat][${id}]`, ...args);
 // --- 1. IN-MEMORY PROFILE/MEMORY -------------------------------------------
 const userMem = new Map();
 const imageCache = new Map();
+const zenHotelPageCache = new Map();
 
 function getMem(userId) {
   if (!userMem.has(userId)) {
@@ -373,14 +374,14 @@ function formatZenDateRange(checkIn, checkOut) {
   return `${start}-${end}`;
 }
 
-function normalizeZenGuests(guests = ZEN_GUESTS_DEFAULT) {
+function normalizeZenGuests(guests = "") {
   const g = sanitizeText(guests);
-  if (!g) return ZEN_GUESTS_DEFAULT;
+  if (!g) return null;
   // Keep official format: "2", "2-2", "2and9", "2and9.12-2"
   if (/^\d+(and\d+(?:\.\d+)*)?(?:-\d+(and\d+(?:\.\d+)*)?)*$/.test(g)) return g;
   const numeric = Number(g);
   if (Number.isFinite(numeric) && numeric > 0) return String(Math.floor(numeric));
-  return ZEN_GUESTS_DEFAULT;
+  return null;
 }
 
 function deriveZenGuestsFromProfile(profile = {}, explicitGuests = null) {
@@ -393,7 +394,7 @@ function deriveZenGuestsFromProfile(profile = {}, explicitGuests = null) {
   const travelMode = sanitizeText(profile?.travel_alone_or_with).toLowerCase();
   if (travelMode === "solo") return "1";
 
-  return ZEN_GUESTS_DEFAULT;
+  return null;
 }
 
 function deriveZenGuestsForHotelSearch(args = {}, profile = {}) {
@@ -412,7 +413,6 @@ function buildZenParams({ checkIn, checkOut, guests, lang, cur, partnerExtra }) 
   const params = new URLSearchParams({
     cur: cur || ZEN_CURRENCY,
     lang: lang || ZEN_LANG,
-    guests: normalizeZenGuests(guests),
     partner_slug: ZEN_PARTNER_SLUG,
     utm_campaign: ZEN_UTM_CAMPAIGN,
     utm_medium: ZEN_UTM_MEDIUM,
@@ -420,6 +420,8 @@ function buildZenParams({ checkIn, checkOut, guests, lang, cur, partnerExtra }) 
     utm_term: ZEN_UTM_TERM,
     partner_extra: sanitizeText(partnerExtra) || ZEN_PARTNER_EXTRA,
   });
+  const normalizedGuests = normalizeZenGuests(guests);
+  if (normalizedGuests) params.set("guests", normalizedGuests);
   const dates = formatZenDateRange(checkIn, checkOut);
   if (dates) params.set("dates", dates);
   return params;
@@ -576,6 +578,14 @@ function extractZenIds(payload = {}, expectedHotelName = "") {
         return {
           hotelId: hotelId ? String(hotelId) : null,
           regionId: regionId ? String(regionId) : null,
+          hotelUrl:
+            hotel?.url ||
+            hotel?.hotel_url ||
+            hotel?.deeplink ||
+            hotel?.link ||
+            hotel?.seo_url ||
+            hotel?.search_url ||
+            null,
           name,
         };
       })
@@ -602,12 +612,14 @@ function extractZenIds(payload = {}, expectedHotelName = "") {
       return {
         hotelId: best.hotelId,
         regionId: best.regionId,
+        hotelUrl: best.hotelUrl || null,
       };
     }
     // If the hotel-name match is weak, avoid linking to a wrong property.
     return {
       hotelId: null,
       regionId: best?.regionId || (firstRegionId ? String(firstRegionId) : null),
+      hotelUrl: null,
     };
   }
 
@@ -623,6 +635,7 @@ function extractZenIds(payload = {}, expectedHotelName = "") {
   return {
     hotelId: hotelId ? String(hotelId) : null,
     regionId: regionId ? String(regionId) : null,
+    hotelUrl: firstHotel?.hotelUrl || null,
   };
 }
 
@@ -638,22 +651,79 @@ async function resolveZenIds({ hotelName = "", city = "", reqId } = {}) {
     const payload = await fetchRateHawkMulticomplete(q, reqId);
     if (!payload) continue;
     const ids = extractZenIds(payload, name);
-    if (ids.hotelId || ids.regionId) return ids;
+    if (ids.hotelId || ids.regionId || ids.hotelUrl) return ids;
   }
-  return { hotelId: null, regionId: null };
+  return { hotelId: null, regionId: null, hotelUrl: null };
 }
 
 function buildZenSerpUrl(regionId, params) {
   const p = new URLSearchParams(params.toString());
   p.set("q", String(regionId));
-  return `https://www.zenhotels.com/?${p.toString()}`;
+  return `https://www.zenhotels.com/hotels/?${p.toString()}`;
 }
 
 function buildZenSearchUrl(query, params) {
   const p = new URLSearchParams(params.toString());
   const q = sanitizeText(query);
   if (q) p.set("q", q);
-  return `https://www.zenhotels.com/?${p.toString()}`;
+  return `https://www.zenhotels.com/hotels/?${p.toString()}`;
+}
+
+function normalizeZenHotelPageUrl(raw = "") {
+  const candidate = sanitizeText(raw);
+  if (!candidate) return null;
+  const withHost = candidate.startsWith("http")
+    ? candidate
+    : `https://www.zenhotels.com${candidate.startsWith("/") ? "" : "/"}${candidate}`;
+  try {
+    const u = new URL(withHost);
+    const host = (u.hostname || "").replace(/^www\./, "").toLowerCase();
+    if (host !== "zenhotels.com") return null;
+    if (!/^\/hotel\//i.test(u.pathname || "")) return null;
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function appendQueryParams(url, params) {
+  try {
+    const u = new URL(url);
+    const existing = new URLSearchParams(u.search || "");
+    for (const [k, v] of params.entries()) {
+      if (!existing.has(k)) existing.set(k, v);
+    }
+    u.search = existing.toString();
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+async function resolveZenHotelPageViaSerp({ hotelName = "", city = "", reqId = null } = {}) {
+  if (!SERPAPI_KEY) return null;
+  const name = sanitizeText(hotelName);
+  if (!name) return null;
+
+  const place = sanitizeText(city);
+  const cacheKey = `${name.toLowerCase()}|${place.toLowerCase()}`;
+  if (zenHotelPageCache.has(cacheKey)) return zenHotelPageCache.get(cacheKey);
+
+  const query = `site:zenhotels.com/hotel "${name}" ${place}`.trim();
+  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${SERPAPI_KEY}&num=6`;
+
+  try {
+    const data = await fetch(url).then((r) => r.json());
+    const links = (data?.organic_results || [])
+      .map((r) => normalizeZenHotelPageUrl(r?.link))
+      .filter(Boolean);
+    const chosen = links[0] || null;
+    if (chosen) zenHotelPageCache.set(cacheKey, chosen);
+    return chosen;
+  } catch (e) {
+    logError(reqId || "n/a", "Zen hotel page lookup failed", e?.message || e);
+    return null;
+  }
 }
 
 async function createAffiliateLink({
@@ -661,7 +731,7 @@ async function createAffiliateLink({
   city = "",
   checkIn = null,
   checkOut = null,
-  guests = ZEN_GUESTS_DEFAULT,
+  guests = null,
   hotelId = null,
   regionId = null,
   partnerExtra = ZEN_PARTNER_EXTRA,
@@ -676,12 +746,19 @@ async function createAffiliateLink({
 
   let resolvedHotelId = hotelId ? String(hotelId) : null;
   let resolvedRegionId = regionId ? String(regionId) : null;
+  let resolvedHotelUrl = null;
 
   if (!resolvedHotelId && !resolvedRegionId) {
     const resolved = await resolveZenIds({ hotelName, city, reqId });
     resolvedHotelId = resolved.hotelId;
     resolvedRegionId = resolved.regionId;
+    resolvedHotelUrl = normalizeZenHotelPageUrl(resolved.hotelUrl);
   }
+
+  if (resolvedHotelUrl) return appendQueryParams(resolvedHotelUrl, params);
+
+  const resolvedBySearch = await resolveZenHotelPageViaSerp({ hotelName, city, reqId });
+  if (resolvedBySearch) return appendQueryParams(resolvedBySearch, params);
 
   const nameAndCityQuery = [sanitizeText(hotelName), sanitizeText(city)]
     .filter(Boolean)
