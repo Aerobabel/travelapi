@@ -520,6 +520,25 @@ function scoreHotelNameMatch(expectedName = "", candidateName = "") {
   return overlap / Math.max(expectedTokens.size, candidateTokens.size);
 }
 
+function pickHotelFromMemory(hotelLikeText = "", hotels = []) {
+  const list = Array.isArray(hotels) ? hotels : [];
+  if (list.length === 0) return null;
+
+  const target = sanitizeText(hotelLikeText);
+  if (!target) return list[0] || null;
+
+  const ranked = list
+    .map((h) => ({
+      ...h,
+      score: scoreHotelNameMatch(target, h?.name || ""),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = ranked[0];
+  if (best && best.score >= 0.55) return best;
+  return null;
+}
+
 function extractZenIds(payload = {}, expectedHotelName = "") {
   const hotels =
     payload?.hotels ||
@@ -1471,6 +1490,23 @@ router.post("/travel", async (req, res) => {
 
                 const budgetMode = sanitizeText(mem?.profile?.budget?.prefer_comfort_or_saving || "balanced").toLowerCase();
                 const ranked = selectHotelsByBudgetMode(Array.from(byHotel.values()), budgetMode, 8);
+                mem.lastHotels = ranked.map((h) => ({
+                  hotelId: h.hotelId,
+                  name: h.name,
+                  total: Number(h.total) || 0,
+                  rating: Number(h.rating) || 0,
+                  checkIn,
+                  checkOut,
+                  city: cityRaw,
+                }));
+                mem.lastHotelSearch = {
+                  city: cityRaw,
+                  checkIn,
+                  checkOut,
+                  guests: zenGuests,
+                  budgetMode,
+                  at: new Date().toISOString(),
+                };
 
                 if (ranked.length > 0) {
                   const lines = await Promise.all(
@@ -1676,6 +1712,9 @@ router.post("/travel", async (req, res) => {
           }
 
           // 2. Enrich Logos & URLs
+          const hotelContext = mem?.lastHotelSearch || {};
+          const hotelCheckIn = sanitizeText(hotelContext.checkIn) || tripStart;
+          const hotelCheckOut = sanitizeText(hotelContext.checkOut) || tripEnd;
           const zenGuestsForPlan = deriveZenGuestsFromProfile(mem?.profile);
           for (const item of plan.costBreakdown) {
             const lowerItem = (item.item || "").toLowerCase();
@@ -1694,12 +1733,24 @@ router.post("/travel", async (req, res) => {
               );
 
             if (isHotelLike) {
+              const matchedHotel = pickHotelFromMemory(item.provider || item.item, mem?.lastHotels || []);
+              if (matchedHotel?.total && matchedHotel.total > 0) {
+                item.price = Number(matchedHotel.total.toFixed(2));
+                if (!item.provider || item.provider.toLowerCase().includes("hotel")) {
+                  item.provider = matchedHotel.name;
+                }
+                if (!item.details || /hotel|stay|accommodation/i.test(String(item.details))) {
+                  item.details = `${hotelCheckIn} to ${hotelCheckOut}`;
+                }
+              }
+
               item.booking_url = await createAffiliateLink({
-                hotelName: item.provider || item.item,
-                city: plan.location,
-                checkIn: tripStart,
-                checkOut: tripEnd,
+                hotelName: matchedHotel?.name || item.provider || item.item,
+                city: matchedHotel?.city || hotelContext.city || plan.location,
+                checkIn: hotelCheckIn,
+                checkOut: hotelCheckOut,
                 guests: zenGuestsForPlan,
+                hotelId: matchedHotel?.hotelId || null,
                 reqId,
               });
             } else if (!item.booking_url) {
