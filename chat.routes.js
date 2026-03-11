@@ -90,6 +90,10 @@ function getMem(userId) {
         budget: {
           prefer_comfort_or_saving: "balanced",
         },
+        guest_counts: {
+          adults: null,
+          children: 0,
+        },
 
         preferred_formats: [],
         liked_activities: [],
@@ -301,6 +305,22 @@ function updateProfileFromHistory(messages, mem) {
   if (lower.includes("cheap") || lower.includes("affordable")) {
     profile.budget.prefer_comfort_or_saving = "saving";
   }
+  const guestsMatch =
+    text.match(/guests:\s*(\d+)\s*adult(?:\(s\))?\s*,\s*(\d+)\s*child(?:\(ren\))?/i) ||
+    text.match(/there will be\s*(\d+)\s*adult(?:\(s\))?\s*and\s*(\d+)\s*child(?:\(ren\))?/i) ||
+    text.match(/(\d+)\s*adult(?:\(s\))?(?:\s*(?:,|and)\s*(\d+)\s*child(?:\(ren\))?)?/i);
+  if (guestsMatch?.[1]) {
+    const adults = Number(guestsMatch[1]);
+    const children = Number(guestsMatch[2] || 0);
+    if (Number.isFinite(adults) && adults > 0) {
+      profile.guest_counts = {
+        adults: Math.floor(adults),
+        children: Number.isFinite(children) && children > 0 ? Math.floor(children) : 0,
+      };
+    }
+  } else if (profile.travel_alone_or_with === "solo") {
+    profile.guest_counts = { adults: 1, children: 0 };
+  }
 
   const cities = extractMultiCities(text);
   if (cities.length > 1) profile.multi_cities = cities;
@@ -361,6 +381,31 @@ function normalizeZenGuests(guests = ZEN_GUESTS_DEFAULT) {
   const numeric = Number(g);
   if (Number.isFinite(numeric) && numeric > 0) return String(Math.floor(numeric));
   return ZEN_GUESTS_DEFAULT;
+}
+
+function deriveZenGuestsFromProfile(profile = {}, explicitGuests = null) {
+  const explicit = sanitizeText(explicitGuests);
+  if (explicit) return normalizeZenGuests(explicit);
+
+  const adults = Number(profile?.guest_counts?.adults);
+  if (Number.isFinite(adults) && adults > 0) return String(Math.floor(adults));
+
+  const travelMode = sanitizeText(profile?.travel_alone_or_with).toLowerCase();
+  if (travelMode === "solo") return "1";
+
+  return ZEN_GUESTS_DEFAULT;
+}
+
+function deriveZenGuestsForHotelSearch(args = {}, profile = {}) {
+  const guests = sanitizeText(args?.guests);
+  if (guests) return normalizeZenGuests(guests);
+
+  const adults = Number(args?.adults);
+  if (Number.isFinite(adults) && adults > 0) {
+    return String(Math.floor(adults));
+  }
+
+  return deriveZenGuestsFromProfile(profile);
 }
 
 function buildZenParams({ checkIn, checkOut, guests, lang, cur, partnerExtra }) {
@@ -518,6 +563,13 @@ function extractZenIds(payload = {}, expectedHotelName = "") {
       .filter((c) => c.hotelId || c.regionId)
     : [];
 
+  const firstRegion = Array.isArray(regions) ? regions[0] : null;
+  const firstRegionId =
+    firstRegion?.id ||
+    firstRegion?.region_id ||
+    firstRegion?.regionId ||
+    null;
+
   const matchTarget = sanitizeText(expectedHotelName);
   if (matchTarget && hotelCandidates.length > 0) {
     const ranked = hotelCandidates
@@ -533,18 +585,20 @@ function extractZenIds(payload = {}, expectedHotelName = "") {
         regionId: best.regionId,
       };
     }
+    // If the hotel-name match is weak, avoid linking to a wrong property.
+    return {
+      hotelId: null,
+      regionId: best?.regionId || (firstRegionId ? String(firstRegionId) : null),
+    };
   }
 
   const firstHotel = hotelCandidates[0] || null;
-  const firstRegion = Array.isArray(regions) ? regions[0] : null;
 
   const hotelId = firstHotel?.hotelId || null;
 
   const regionId =
     firstHotel?.regionId ||
-    firstRegion?.id ||
-    firstRegion?.region_id ||
-    firstRegion?.regionId ||
+    firstRegionId ||
     null;
 
   return {
@@ -880,6 +934,9 @@ const tools = [
           city: { type: "string", description: "City Name or IATA code" },
           checkIn: { type: "string", description: "YYYY-MM-DD" },
           checkOut: { type: "string", description: "YYYY-MM-DD" },
+          adults: { type: "number", description: "Number of adults, if known" },
+          children: { type: "number", description: "Number of children, if known" },
+          guests: { type: "string", description: "Provider guest format (e.g. '1', '2', '2-1')" },
         },
         required: ["city", "checkIn", "checkOut"],
       },
@@ -1352,6 +1409,7 @@ router.post("/travel", async (req, res) => {
             const cityRaw = sanitizeText(args.city);
             const checkIn = sanitizeText(args.checkIn);
             const checkOut = sanitizeText(args.checkOut);
+            const zenGuests = deriveZenGuestsForHotelSearch(args, mem?.profile);
             // 1. Resolve city to IATA or use directly if 3 chars
             let cityCode = cityRaw.length === 3 ? cityRaw.toUpperCase() : null;
             if (!cityCode) {
@@ -1422,6 +1480,7 @@ router.post("/travel", async (req, res) => {
                         city: cityRaw,
                         checkIn,
                         checkOut,
+                        guests: zenGuests,
                         reqId,
                       });
                       const ratingPart = h.rating > 0 ? `, rating ${h.rating}` : "";
@@ -1617,6 +1676,7 @@ router.post("/travel", async (req, res) => {
           }
 
           // 2. Enrich Logos & URLs
+          const zenGuestsForPlan = deriveZenGuestsFromProfile(mem?.profile);
           for (const item of plan.costBreakdown) {
             const lowerItem = (item.item || "").toLowerCase();
             const lowerProv = (item.provider || "").toLowerCase();
@@ -1639,6 +1699,7 @@ router.post("/travel", async (req, res) => {
                 city: plan.location,
                 checkIn: tripStart,
                 checkOut: tripEnd,
+                guests: zenGuestsForPlan,
                 reqId,
               });
             } else if (!item.booking_url) {
