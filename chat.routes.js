@@ -43,6 +43,9 @@ const RATEHAWK_KEY_ID = process.env.RATEHAWK_KEY_ID || "";
 const RATEHAWK_API_KEY = process.env.RATEHAWK_API_KEY || "";
 const RATEHAWK_KEY_TYPE = String(process.env.RATEHAWK_KEY_TYPE || "").trim().toLowerCase();
 const RATEHAWK_TIMEOUT_MS = Number(process.env.RATEHAWK_TIMEOUT_MS || 4500);
+const RATEHAWK_RESIDENCY_DEFAULT = String(process.env.RATEHAWK_RESIDENCY || "us")
+  .trim()
+  .toLowerCase();
 
 const ZEN_PARTNER_SLUG = process.env.ZEN_PARTNER_SLUG || "285572.affiliate.37e8";
 const ZEN_UTM_CAMPAIGN = process.env.ZEN_UTM_CAMPAIGN || "en-en, deeplink, affiliate";
@@ -63,6 +66,7 @@ const logError = (id, ...args) => console.error(`[chat][${id}]`, ...args);
 const userMem = new Map();
 const imageCache = new Map();
 const zenHotelPageCache = new Map();
+const rateHawkHotelInfoCache = new Map();
 
 function getMem(userId) {
   if (!userMem.has(userId)) {
@@ -492,6 +496,300 @@ async function fetchRateHawkMulticomplete(query, reqId) {
   }
 }
 
+function buildHotelNameHintsFromMulticomplete(payload = {}) {
+  const hotels =
+    payload?.hotels ||
+    payload?.result?.hotels ||
+    payload?.data?.hotels ||
+    [];
+  const map = new Map();
+  if (!Array.isArray(hotels)) return map;
+  for (const h of hotels) {
+    const name = sanitizeText(
+      h?.name || h?.hotel_name || h?.hotelName || h?.title || ""
+    );
+    if (!name) continue;
+    const hid = h?.hid || h?.hotel_id || h?.hotelId || null;
+    const id = h?.id || null;
+    if (hid !== null && hid !== undefined) map.set(String(hid), name);
+    if (id !== null && id !== undefined) map.set(String(id), name);
+  }
+  return map;
+}
+
+function deriveRateHawkResidency(profile = {}) {
+  const raw = sanitizeText(profile?.nationality).toLowerCase();
+  if (/^[a-z]{2}$/.test(raw)) return raw;
+  return RATEHAWK_RESIDENCY_DEFAULT || "us";
+}
+
+function buildRateHawkGuestsPayload(zenGuests = null) {
+  const normalized = normalizeZenGuests(zenGuests);
+  if (!normalized) {
+    return [{ adults: 1, children: [] }];
+  }
+
+  const rooms = normalized
+    .split("-")
+    .map((segment) => {
+      const s = sanitizeText(segment);
+      if (!s) return null;
+      const m = /^(\d+)(?:and(\d+(?:\.\d+)*))?$/.exec(s);
+      if (!m) return null;
+      const adults = Math.max(1, Math.floor(Number(m[1]) || 1));
+      const children = (m[2] || "")
+        .split(".")
+        .map((age) => Math.floor(Number(age)))
+        .filter((age) => Number.isFinite(age) && age >= 0 && age <= 17);
+      return { adults, children };
+    })
+    .filter(Boolean);
+
+  return rooms.length > 0 ? rooms : [{ adults: 1, children: [] }];
+}
+
+function toDisplayHotelName(value = "") {
+  const raw = sanitizeText(value);
+  if (!raw) return "Hotel";
+  if (raw.includes("_")) {
+    return raw
+      .split("_")
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  }
+  return raw;
+}
+
+function extractRateTotalFromRate(rate = {}) {
+  const paymentTypes = Array.isArray(rate?.payment_options?.payment_types)
+    ? rate.payment_options.payment_types
+    : [];
+  let best = Number.POSITIVE_INFINITY;
+
+  for (const pt of paymentTypes) {
+    const n = Number(
+      pt?.show_amount ??
+      pt?.showPrice ??
+      pt?.amount ??
+      pt?.price ??
+      0
+    );
+    if (Number.isFinite(n) && n > 0 && n < best) best = n;
+  }
+  if (Number.isFinite(best) && best > 0) return best;
+
+  const daily = Array.isArray(rate?.daily_prices)
+    ? rate.daily_prices.reduce((sum, x) => sum + (Number(x) || 0), 0)
+    : 0;
+  return Number.isFinite(daily) && daily > 0 ? daily : 0;
+}
+
+function extractRateHawkSerpHotels(payload = {}, nameHints = new Map()) {
+  const hotels =
+    payload?.hotels ||
+    payload?.result?.hotels ||
+    payload?.data?.hotels ||
+    [];
+  if (!Array.isArray(hotels)) return [];
+
+  const rows = [];
+  for (const h of hotels) {
+    const rates = Array.isArray(h?.rates) ? h.rates : [];
+    let bestRate = null;
+    let bestTotal = Number.POSITIVE_INFINITY;
+    for (const r of rates) {
+      const total = extractRateTotalFromRate(r);
+      if (!Number.isFinite(total) || total <= 0) continue;
+      if (total < bestTotal) {
+        bestRate = r;
+        bestTotal = total;
+      }
+    }
+    if (!bestRate || !Number.isFinite(bestTotal) || bestTotal <= 0) continue;
+
+    const hid = h?.hid || h?.hotel_id || h?.hotelId || null;
+    const legacyId = h?.id ? String(h.id) : null;
+    const hintName =
+      (hid !== null && hid !== undefined && nameHints.get(String(hid))) ||
+      (legacyId && nameHints.get(legacyId)) ||
+      null;
+    const fallbackName =
+      hintName ||
+      sanitizeText(h?.name || h?.hotel_name || h?.hotelName || "") ||
+      toDisplayHotelName(legacyId || "");
+    const quality = Number(
+      bestRate?.rg_ext?.class || bestRate?.rg_ext?.quality || 0
+    );
+
+    rows.push({
+      hotelId: hid !== null && hid !== undefined ? String(hid) : (legacyId || fallbackName),
+      hid: hid !== null && hid !== undefined ? String(hid) : null,
+      legacyId,
+      name: fallbackName || "Hotel",
+      rating: Number.isFinite(quality) ? quality : 0,
+      total: Number(bestTotal) || 0,
+      regionId:
+        h?.region_id !== undefined && h?.region_id !== null
+          ? String(h.region_id)
+          : null,
+      matchHash: sanitizeText(bestRate?.match_hash || ""),
+      searchHash: sanitizeText(bestRate?.search_hash || ""),
+    });
+  }
+  return rows;
+}
+
+async function resolveZenRegionForCity(city, reqId) {
+  const payload = await fetchRateHawkMulticomplete(city, reqId);
+  if (!payload) return { regionId: null, regionName: null, payload: null };
+
+  const regions =
+    payload?.regions ||
+    payload?.result?.regions ||
+    payload?.data?.regions ||
+    [];
+  const cityRaw = sanitizeText(city);
+  if (Array.isArray(regions) && regions.length > 0) {
+    const scored = regions
+      .map((r) => ({
+        id: r?.id || r?.region_id || r?.regionId || null,
+        name: sanitizeText(r?.name || r?.title || r?.label || ""),
+        score: scoreHotelNameMatch(cityRaw, r?.name || r?.title || r?.label || ""),
+      }))
+      .filter((r) => r.id !== null && r.id !== undefined)
+      .sort((a, b) => b.score - a.score);
+
+    const best = scored[0];
+    if (best) {
+      return {
+        regionId: String(best.id),
+        regionName: best.name || cityRaw,
+        payload,
+      };
+    }
+  }
+
+  const hotels =
+    payload?.hotels ||
+    payload?.result?.hotels ||
+    payload?.data?.hotels ||
+    [];
+  if (Array.isArray(hotels)) {
+    const first = hotels.find((h) => h?.region_id || h?.regionId || h?.region?.id);
+    const regionId = first?.region_id || first?.regionId || first?.region?.id || null;
+    if (regionId) {
+      return {
+        regionId: String(regionId),
+        regionName: cityRaw,
+        payload,
+      };
+    }
+  }
+
+  return { regionId: null, regionName: null, payload };
+}
+
+async function fetchRateHawkSerpRegion({
+  regionId,
+  checkIn,
+  checkOut,
+  guests,
+  residency,
+  currency = ZEN_CURRENCY,
+  lang = ZEN_LANG,
+  hotelsLimit = 60,
+  reqId = null,
+} = {}) {
+  const authHeaders = getRateHawkAuthHeaders();
+  if (!authHeaders || !regionId) return null;
+
+  const url = `${RATEHAWK_BASE_URL}/search/serp/region/`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RATEHAWK_TIMEOUT_MS);
+
+  try {
+    const body = {
+      region_id: Number(regionId) || String(regionId),
+      checkin: sanitizeText(checkIn),
+      checkout: sanitizeText(checkOut),
+      residency: sanitizeText(residency || RATEHAWK_RESIDENCY_DEFAULT || "us"),
+      language: sanitizeText(lang || ZEN_LANG || "en"),
+      currency: sanitizeText(currency || ZEN_CURRENCY || "USD"),
+      guests: buildRateHawkGuestsPayload(guests),
+      hotels_limit: Math.max(10, Number(hotelsLimit) || 60),
+    };
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!r.ok) {
+      const raw = await r.text().catch(() => "");
+      logError(reqId || "n/a", `[RateHawk serp/region ${r.status}]`, raw.slice(0, 300));
+      return null;
+    }
+    return await r.json();
+  } catch (e) {
+    logError(reqId || "n/a", "RateHawk serp/region failed", e?.message || e);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchRateHawkHotelInfo({ hid = null, id = null, reqId = null } = {}) {
+  const cacheKey = hid ? `hid:${hid}` : id ? `id:${id}` : null;
+  if (!cacheKey) return null;
+  if (rateHawkHotelInfoCache.has(cacheKey)) return rateHawkHotelInfoCache.get(cacheKey);
+
+  const authHeaders = getRateHawkAuthHeaders();
+  if (!authHeaders) return null;
+
+  const url = `${RATEHAWK_BASE_URL}/hotel/info/`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RATEHAWK_TIMEOUT_MS);
+
+  try {
+    const body = {
+      language: ZEN_LANG,
+    };
+    if (hid !== null && hid !== undefined) body.hid = Number(hid) || String(hid);
+    else if (id) body.id = String(id);
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!r.ok) {
+      const raw = await r.text().catch(() => "");
+      logError(reqId || "n/a", `[RateHawk hotel/info ${r.status}]`, raw.slice(0, 200));
+      return null;
+    }
+    const payload = await r.json();
+    const info = payload?.data || payload?.result || payload || null;
+    if (info) rateHawkHotelInfoCache.set(cacheKey, info);
+    return info;
+  } catch (e) {
+    logError(reqId || "n/a", "RateHawk hotel/info failed", e?.message || e);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function normalizeHotelName(value = "") {
   return sanitizeText(value)
     .toLowerCase()
@@ -589,7 +887,7 @@ function extractZenIds(payload = {}, expectedHotelName = "") {
           name,
         };
       })
-      .filter((c) => c.hotelId || c.regionId)
+      .filter((c) => c.hotelId || c.regionId || c.hotelUrl)
     : [];
 
   const firstRegion = Array.isArray(regions) ? regions[0] : null;
@@ -1031,7 +1329,7 @@ const tools = [
     type: "function",
     function: {
       name: "search_hotels",
-      description: "Search for real hotels using Amadeus.",
+      description: "Search for real hotels using RateHawk/ZenHotels with date-aware availability and pricing.",
       parameters: {
         type: "object",
         properties: {
@@ -1506,7 +1804,7 @@ router.post("/travel", async (req, res) => {
           return runConversation(newHistory, depth + 1);
         }
 
-        // A3. SEARCH HOTELS (AMADEUS)
+        // A3. SEARCH HOTELS (RATEHAWK / ZENHOTELS)
         if (toolName === "search_hotels") {
           let result = "No hotels found.";
           try {
@@ -1514,86 +1812,86 @@ router.post("/travel", async (req, res) => {
             const checkIn = sanitizeText(args.checkIn);
             const checkOut = sanitizeText(args.checkOut);
             const zenGuests = deriveZenGuestsForHotelSearch(args, mem?.profile);
-            // 1. Resolve city to IATA or use directly if 3 chars
-            let cityCode = cityRaw.length === 3 ? cityRaw.toUpperCase() : null;
-            if (!cityCode) {
-              const locs = await amadeus.referenceData.locations.get({ keyword: cityRaw, subType: 'CITY' });
-              cityCode = locs?.data?.[0]?.iataCode;
-            }
-
-            if (!cityCode) {
-              result = "Could not resolve city code.";
+            if (!cityRaw || !checkIn || !checkOut) {
+              result = "Hotel search requires city, checkIn and checkOut.";
+            } else if (!getRateHawkAuthHeaders()) {
+              result = "Hotel search is unavailable: RateHawk/Zen credentials are missing.";
             } else {
-              // 2. Get Hotel IDs
-              const hList = await amadeus.referenceData.locations.hotels.byCity.get({ cityCode });
-              const hIds = (hList?.data || [])
-                .map((h) => h.hotelId)
-                .filter(Boolean)
-                .slice(0, 120);
-
-              if (hIds.length === 0) {
-                result = "No hotels found for this city.";
+              const budgetMode = sanitizeText(mem?.profile?.budget?.prefer_comfort_or_saving || "balanced").toLowerCase();
+              const region = await resolveZenRegionForCity(cityRaw, reqId);
+              const regionId = region?.regionId ? String(region.regionId) : null;
+              if (!regionId) {
+                result = `Could not resolve destination region for "${cityRaw}".`;
               } else {
-                // 3. Get offers in chunks to avoid URL-length and small-sample bias
-                const merged = [];
-                for (const idChunk of chunkArray(hIds, 25)) {
-                  try {
-                    const { data = [] } = await amadeus.shopping.hotelOffersSearch.get({
-                      hotelIds: idChunk.join(","),
-                      checkInDate: checkIn,
-                      checkOutDate: checkOut,
-                      adults: 1,
-                      currencyCode: "USD",
-                      sort: "PRICE",
-                      "page[limit]": 50,
-                    });
-                    if (Array.isArray(data) && data.length > 0) merged.push(...data);
-                  } catch (chunkErr) {
-                    logError(reqId, "Amadeus Hotel chunk error", chunkErr?.message || chunkErr);
-                  }
-                }
-
-                const byHotel = new Map();
-                for (const hotelItem of merged) {
-                  const bestOffer = pickBestOffer(hotelItem, checkIn, checkOut);
-                  const total = getOfferTotal(bestOffer);
-                  if (!bestOffer || total <= 0) continue;
-                  const hotelId = sanitizeText(hotelItem?.hotel?.hotelId || hotelItem?.hotel?.name);
-                  if (!hotelId) continue;
-
-                  const candidate = {
-                    hotelId,
-                    name: hotelItem?.hotel?.name || "Hotel",
-                    rating: Number(hotelItem?.hotel?.rating || 0),
-                    total,
-                    offer: bestOffer,
-                  };
-
-                  const prev = byHotel.get(hotelId);
-                  if (!prev || candidate.total < prev.total) byHotel.set(hotelId, candidate);
-                }
-
-                const budgetMode = sanitizeText(mem?.profile?.budget?.prefer_comfort_or_saving || "balanced").toLowerCase();
-                const ranked = selectHotelsByBudgetMode(Array.from(byHotel.values()), budgetMode, 8);
-                mem.lastHotels = ranked.map((h) => ({
-                  hotelId: h.hotelId,
-                  name: h.name,
-                  total: Number(h.total) || 0,
-                  rating: Number(h.rating) || 0,
-                  checkIn,
-                  checkOut,
-                  city: cityRaw,
-                }));
-                mem.lastHotelSearch = {
-                  city: cityRaw,
+                const serp = await fetchRateHawkSerpRegion({
+                  regionId,
                   checkIn,
                   checkOut,
                   guests: zenGuests,
-                  budgetMode,
-                  at: new Date().toISOString(),
-                };
+                  residency: deriveRateHawkResidency(mem?.profile),
+                  currency: "USD",
+                  lang: ZEN_LANG,
+                  hotelsLimit: 80,
+                  reqId,
+                });
 
-                if (ranked.length > 0) {
+                const hints = buildHotelNameHintsFromMulticomplete(region?.payload || {});
+                const candidates = extractRateHawkSerpHotels(serp, hints);
+
+                if (candidates.length === 0) {
+                  result = `No available hotels were found for ${cityRaw} from ${checkIn} to ${checkOut}.`;
+                } else {
+                  let ranked = selectHotelsByBudgetMode(candidates, budgetMode, 8);
+
+                  // Fetch content only for shortlisted hotels to improve names and rating quality.
+                  const enriched = await Promise.all(
+                    ranked.map(async (h) => {
+                      const info = await fetchRateHawkHotelInfo({
+                        hid: h.hid || null,
+                        id: h.legacyId || null,
+                        reqId,
+                      });
+                      const infoName = sanitizeText(info?.name || info?.hotel_name || "");
+                      const stars = Number(
+                        info?.star_rating ??
+                        info?.star ??
+                        info?.stars ??
+                        h.rating ??
+                        0
+                      );
+                      return {
+                        ...h,
+                        name: infoName || h.name,
+                        rating: Number.isFinite(stars) ? stars : (h.rating || 0),
+                      };
+                    })
+                  );
+
+                  ranked = selectHotelsByBudgetMode(enriched, budgetMode, 8);
+
+                  mem.lastHotels = ranked.map((h) => ({
+                    hotelId: h.hotelId,
+                    hid: h.hid || null,
+                    legacyId: h.legacyId || null,
+                    regionId: h.regionId || regionId,
+                    name: h.name,
+                    total: Number(h.total) || 0,
+                    rating: Number(h.rating) || 0,
+                    checkIn,
+                    checkOut,
+                    city: cityRaw,
+                  }));
+                  mem.lastHotelSearch = {
+                    provider: "ratehawk",
+                    city: cityRaw,
+                    regionId,
+                    checkIn,
+                    checkOut,
+                    guests: zenGuests,
+                    budgetMode,
+                    at: new Date().toISOString(),
+                  };
+
                   const lines = await Promise.all(
                     ranked.map(async (h) => {
                       const affLink = await createAffiliateLink({
@@ -1602,12 +1900,16 @@ router.post("/travel", async (req, res) => {
                         checkIn,
                         checkOut,
                         guests: zenGuests,
+                        hotelId: h.hid || h.hotelId || null,
+                        regionId: h.regionId || regionId,
                         reqId,
                       });
                       const ratingPart = h.rating > 0 ? `, rating ${h.rating}` : "";
-                      return `Hotel ${h.name} (${h.hotelId}): from $${h.total.toFixed(2)} total for ${checkIn} to ${checkOut}${ratingPart}. Book here: ${affLink}`;
+                      const idPart = h.hid ? `hid:${h.hid}` : h.hotelId;
+                      return `Hotel ${h.name} (${idPart}): from $${h.total.toFixed(2)} total for ${checkIn} to ${checkOut}${ratingPart}. Book here: ${affLink}`;
                     })
                   );
+
                   const modeLine =
                     budgetMode === "comfort"
                       ? "Preference mode: comfort (higher-rated options first, still price-aware)."
@@ -1615,14 +1917,12 @@ router.post("/travel", async (req, res) => {
                         ? "Preference mode: budget (lowest-price options first)."
                         : "Preference mode: balanced (mix of value picks and well-rated stays).";
                   result = `${modeLine}\n${lines.join("\n")}`;
-                } else {
-                  result = `No hotels with confirmed pricing were found for ${cityRaw} from ${checkIn} to ${checkOut}.`;
                 }
               }
             }
           } catch (e) {
             result = `Hotel search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
-            logError(reqId, "Amadeus Hotel Error", e);
+            logError(reqId, "RateHawk Hotel Error", e);
           }
           newHistory.push({
             role: "tool",
