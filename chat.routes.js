@@ -656,17 +656,6 @@ function buildZenSearchUrl(query, params) {
   return `https://www.zenhotels.com/hotels/?${p.toString()}`;
 }
 
-function buildZenHotelUrl(hotelId, params) {
-  return `https://www.zenhotels.com/rooms/${encodeURIComponent(String(hotelId))}/?${params.toString()}`;
-}
-
-function isSafeZenRoomId(hotelId = "") {
-  const id = sanitizeText(hotelId);
-  // /rooms/{id} is not reliably valid for alphanumeric slugs like "ATDXBRCN".
-  // Keep strict until we have confirmed formats from provider docs.
-  return /^\d+$/.test(id);
-}
-
 async function createAffiliateLink({
   hotelName = "",
   city = "",
@@ -694,16 +683,13 @@ async function createAffiliateLink({
     resolvedRegionId = resolved.regionId;
   }
 
-  if (resolvedHotelId && isSafeZenRoomId(resolvedHotelId)) {
-    return buildZenHotelUrl(resolvedHotelId, params);
-  }
-  if (resolvedRegionId) return buildZenSerpUrl(resolvedRegionId, params);
-
   const nameAndCityQuery = [sanitizeText(hotelName), sanitizeText(city)]
     .filter(Boolean)
     .join(" ")
     .trim();
   if (nameAndCityQuery) return buildZenSearchUrl(nameAndCityQuery, params);
+
+  if (resolvedRegionId) return buildZenSerpUrl(resolvedRegionId, params);
 
   // Fallback keeps attribution even if destination lookup fails.
   return buildZenSearchUrl(sanitizeText(city), params);
