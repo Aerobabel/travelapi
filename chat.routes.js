@@ -295,9 +295,12 @@ function updateProfileFromHistory(messages, mem) {
   ["sea", "mountains", "city"].forEach((v) => {
     if (lower.includes(v)) profile.accommodation.prefer_view = v;
   });
-  ["comfort", "saving", "balanced"].forEach((b) => {
+  ["comfort", "saving", "balanced", "budget"].forEach((b) => {
     if (lower.includes(b)) profile.budget.prefer_comfort_or_saving = b;
   });
+  if (lower.includes("cheap") || lower.includes("affordable")) {
+    profile.budget.prefer_comfort_or_saving = "saving";
+  }
 
   const cities = extractMultiCities(text);
   if (cities.length > 1) profile.multi_cities = cities;
@@ -442,7 +445,37 @@ async function fetchRateHawkMulticomplete(query, reqId) {
   }
 }
 
-function extractZenIds(payload = {}) {
+function normalizeHotelName(value = "") {
+  return sanitizeText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function scoreHotelNameMatch(expectedName = "", candidateName = "") {
+  const expected = normalizeHotelName(expectedName);
+  const candidate = normalizeHotelName(candidateName);
+  if (!expected || !candidate) return 0;
+  if (expected === candidate) return 1;
+  if (expected.includes(candidate) || candidate.includes(expected)) {
+    const minLen = Math.min(expected.length, candidate.length);
+    const maxLen = Math.max(expected.length, candidate.length) || 1;
+    return 0.7 + (minLen / maxLen) * 0.2;
+  }
+
+  const expectedTokens = new Set(expected.split(" ").filter(Boolean));
+  const candidateTokens = new Set(candidate.split(" ").filter(Boolean));
+  if (!expectedTokens.size || !candidateTokens.size) return 0;
+
+  let overlap = 0;
+  for (const token of expectedTokens) {
+    if (candidateTokens.has(token)) overlap += 1;
+  }
+  return overlap / Math.max(expectedTokens.size, candidateTokens.size);
+}
+
+function extractZenIds(payload = {}, expectedHotelName = "") {
   const hotels =
     payload?.hotels ||
     payload?.result?.hotels ||
@@ -454,20 +487,61 @@ function extractZenIds(payload = {}) {
     payload?.data?.regions ||
     [];
 
-  const firstHotel = Array.isArray(hotels) ? hotels[0] : null;
+  const hotelCandidates = Array.isArray(hotels)
+    ? hotels
+      .map((hotel) => {
+        const hotelId =
+          hotel?.id ||
+          hotel?.hotel_id ||
+          hotel?.hotelId ||
+          hotel?.hid ||
+          null;
+        const regionId =
+          hotel?.region_id ||
+          hotel?.regionId ||
+          hotel?.region?.id ||
+          null;
+        const name =
+          hotel?.name ||
+          hotel?.hotel_name ||
+          hotel?.hotelName ||
+          hotel?.title ||
+          hotel?.full_name ||
+          hotel?.label ||
+          "";
+        return {
+          hotelId: hotelId ? String(hotelId) : null,
+          regionId: regionId ? String(regionId) : null,
+          name,
+        };
+      })
+      .filter((c) => c.hotelId || c.regionId)
+    : [];
+
+  const matchTarget = sanitizeText(expectedHotelName);
+  if (matchTarget && hotelCandidates.length > 0) {
+    const ranked = hotelCandidates
+      .map((c) => ({
+        ...c,
+        score: scoreHotelNameMatch(matchTarget, c.name),
+      }))
+      .sort((a, b) => b.score - a.score);
+    const best = ranked[0];
+    if (best && best.score >= 0.55) {
+      return {
+        hotelId: best.hotelId,
+        regionId: best.regionId,
+      };
+    }
+  }
+
+  const firstHotel = hotelCandidates[0] || null;
   const firstRegion = Array.isArray(regions) ? regions[0] : null;
 
-  const hotelId =
-    firstHotel?.id ||
-    firstHotel?.hotel_id ||
-    firstHotel?.hotelId ||
-    firstHotel?.hid ||
-    null;
+  const hotelId = firstHotel?.hotelId || null;
 
   const regionId =
-    firstHotel?.region_id ||
     firstHotel?.regionId ||
-    firstHotel?.region?.id ||
     firstRegion?.id ||
     firstRegion?.region_id ||
     firstRegion?.regionId ||
@@ -490,7 +564,7 @@ async function resolveZenIds({ hotelName = "", city = "", reqId } = {}) {
   for (const q of tries) {
     const payload = await fetchRateHawkMulticomplete(q, reqId);
     if (!payload) continue;
-    const ids = extractZenIds(payload);
+    const ids = extractZenIds(payload, name);
     if (ids.hotelId || ids.regionId) return ids;
   }
   return { hotelId: null, regionId: null };
@@ -576,28 +650,7 @@ async function performGoogleSearch(rawQuery, reqId) {
 
     // --- HOTELS ---
     if (startsWith("__hotels__")) {
-      const loc = query.replace("__hotels__", "").trim();
-      const url = `https://serpapi.com/search.json?engine=google_hotels&q=${encodeURIComponent(
-        loc
-      )}&currency=USD&api_key=${SERPAPI_KEY}`;
-
-      const data = await fetch(url).then((r) => r.json());
-      const results = await Promise.all(
-        (data.properties || []).slice(0, 7).map(async (p) => ({
-          name: p.name,
-          total_rate: p.total_rate?.lowest || p.rate_per_night?.lowest,
-          rating: p.overall_rating,
-          description: p.description,
-          link: await createAffiliateLink({
-            hotelName: p.name,
-            city: loc,
-            reqId,
-          }),
-          latitude: p.gps_coordinates?.latitude,
-          longitude: p.gps_coordinates?.longitude,
-        }))
-      );
-      return JSON.stringify(results);
+      return "Hotel search via search_google is disabled because it is not date-aware. Use search_hotels with checkIn/checkOut for availability and accurate pricing.";
     }
 
     // --- FLIGHTS ---
@@ -677,6 +730,93 @@ async function performGoogleSearch(rawQuery, reqId) {
   }
 }
 
+function chunkArray(arr = [], size = 25) {
+  const chunkSize = Math.max(1, Number(size) || 25);
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+function getOfferTotal(offer = {}) {
+  const priceObj = offer?.price || {};
+  const total = Number(priceObj.grandTotal || priceObj.total || priceObj.base || 0);
+  return Number.isFinite(total) ? total : 0;
+}
+
+function pickBestOffer(hotelItem = {}, checkIn = "", checkOut = "") {
+  const offers = Array.isArray(hotelItem?.offers) ? hotelItem.offers : [];
+  if (offers.length === 0) return null;
+
+  const wantedCheckIn = sanitizeText(checkIn);
+  const wantedCheckOut = sanitizeText(checkOut);
+  const sameDateOffers = offers.filter((offer) => {
+    const offerCheckIn = sanitizeText(offer?.checkInDate || offer?.checkIn || "");
+    const offerCheckOut = sanitizeText(offer?.checkOutDate || offer?.checkOut || "");
+    if (!wantedCheckIn || !wantedCheckOut) return true;
+    if (!offerCheckIn || !offerCheckOut) return true;
+    return offerCheckIn === wantedCheckIn && offerCheckOut === wantedCheckOut;
+  });
+
+  const pool = sameDateOffers.length > 0 ? sameDateOffers : offers;
+  let best = null;
+  let bestPrice = Number.POSITIVE_INFINITY;
+  for (const offer of pool) {
+    const total = getOfferTotal(offer);
+    if (!Number.isFinite(total) || total <= 0) continue;
+    if (total < bestPrice) {
+      best = offer;
+      bestPrice = total;
+    }
+  }
+  return best;
+}
+
+function selectHotelsByBudgetMode(candidates = [], budgetMode = "balanced", limit = 8) {
+  const list = Array.isArray(candidates) ? [...candidates] : [];
+  if (list.length === 0) return [];
+  const cap = Math.max(1, Number(limit) || 8);
+  const mode = sanitizeText(budgetMode).toLowerCase();
+
+  const byPrice = [...list].sort((a, b) => a.total - b.total);
+  if (mode === "saving" || mode === "budget") {
+    return byPrice.slice(0, cap);
+  }
+
+  if (mode === "comfort") {
+    return [...list]
+      .sort((a, b) => {
+        if ((b.rating || 0) !== (a.rating || 0)) return (b.rating || 0) - (a.rating || 0);
+        return a.total - b.total;
+      })
+      .slice(0, cap);
+  }
+
+  // Balanced: keep part of the cheapest set, then fill with higher-rated options.
+  const picks = [];
+  const pickedIds = new Set();
+  const cheapCount = Math.max(2, Math.floor(cap / 2));
+  for (const h of byPrice) {
+    if (picks.length >= cheapCount) break;
+    picks.push(h);
+    pickedIds.add(h.hotelId);
+  }
+
+  const rated = [...list]
+    .filter((h) => !pickedIds.has(h.hotelId))
+    .sort((a, b) => {
+      if ((b.rating || 0) !== (a.rating || 0)) return (b.rating || 0) - (a.rating || 0);
+      return a.total - b.total;
+    });
+
+  for (const h of rated) {
+    if (picks.length >= cap) break;
+    picks.push(h);
+  }
+  return picks;
+}
+
 // --- 4. TOOLS ---------------------------------------------------------------
 
 const tools = [
@@ -703,7 +843,7 @@ const tools = [
     function: {
       name: "search_google",
       description:
-        "Search for restaurants, activities,- Make the plan REALISTIC. Do NOT use placeholder prices.\n- Provide OFFICIAL booking URLs for flights and hotels in the 'booking_url' field (e.g. 'https://www.turkishairlines.com', 'https://www.radisson.com'). Avoid generic Google Search links.\n- The user can \"Pay Now\", so accurate links are critical.ghts or hotels anymore. Use prefixes: '__restaurants__ Rome', '__activities__ Tokyo'.",
+        "Search Google for restaurants or activities only. Use prefixes: '__restaurants__ Rome', '__activities__ Tokyo'. Do not use this tool for flights or hotels.",
       parameters: {
         type: "object",
         properties: {
@@ -949,7 +1089,10 @@ Your goal:
 
 - Use **real hotels**:
   - Real property names, approximate nightly rates, and ratings. 
-  - Aim for high-rated, characterful stays (boutique, luxury, or unique local spots) rather than just generic chains.
+  - Respect budget preference:
+    - "saving/budget" -> prioritize lowest-priced available options.
+    - "comfort" -> prioritize high-rated options (still with realistic prices).
+    - "balanced" -> include a mix of value and quality, not only the cheapest.
 - Use **real restaurants and activities**:
   - Real venue/tour names, taken from search results.
   - **CRITICAL:** Search for "hidden gems", "local favorites", "best kept secrets", and "unique experiences".
@@ -973,10 +1116,10 @@ When you call \`create_plan\`:
 
 - Flights in \`flights\`:
   - Use airline name, flight number, and realistic departure/arrival times and approximate price.
-  - Derive from \`search_google("__flights__ ...")\` results.
+  - Derive from \`search_flights\` tool results.
 
 - Hotels:
-  - Use hotel names from \`__hotels__\` results.
+  - Use hotel names, prices, and ratings from \`search_hotels\` tool results for the selected date range.
 
 - Restaurants / Food:
   - Use restaurant names from \`__restaurants__\` results.
@@ -1027,8 +1170,10 @@ TOOLS AND ORDER (ONE TOOL PER MESSAGE)
   1. Clarify origin + preferences (budget, style, with whom).
   2. Call \`request_dates\`.
   3. Call \`request_guests\`.
-  4. Call \`search_google\` multiple times (in separate turns) for flights, hotels, restaurants, activities.
-  5. Call \`create_plan\` once, when you have enough info.
+  4. Call \`search_flights\`.
+  5. Call \`search_hotels\`.
+  6. Call \`search_google\` for restaurants/activities only.
+  7. Call \`create_plan\` once, when you have enough info.
 
 Never say "I can't do X because I don't have browsing" — you DO have a search tool, also create more than 2 itineraries for each day.
 `;
@@ -1204,46 +1349,95 @@ router.post("/travel", async (req, res) => {
         if (toolName === "search_hotels") {
           let result = "No hotels found.";
           try {
+            const cityRaw = sanitizeText(args.city);
+            const checkIn = sanitizeText(args.checkIn);
+            const checkOut = sanitizeText(args.checkOut);
             // 1. Resolve city to IATA or use directly if 3 chars
-            let cityCode = args.city.length === 3 ? args.city.toUpperCase() : null;
+            let cityCode = cityRaw.length === 3 ? cityRaw.toUpperCase() : null;
             if (!cityCode) {
-              const locs = await amadeus.referenceData.locations.get({ keyword: args.city, subType: 'CITY' });
+              const locs = await amadeus.referenceData.locations.get({ keyword: cityRaw, subType: 'CITY' });
               cityCode = locs?.data?.[0]?.iataCode;
             }
 
-            if (cityCode) {
+            if (!cityCode) {
+              result = "Could not resolve city code.";
+            } else {
               // 2. Get Hotel IDs
               const hList = await amadeus.referenceData.locations.hotels.byCity.get({ cityCode });
-              const hIds = (hList?.data || []).slice(0, 10).map(h => h.hotelId);
+              const hIds = (hList?.data || [])
+                .map((h) => h.hotelId)
+                .filter(Boolean)
+                .slice(0, 120);
 
-              if (hIds.length > 0) {
-                // 3. Get Offers
-                const { data } = await amadeus.shopping.hotelOffersSearch.get({
-                  hotelIds: hIds.join(','),
-                  checkInDate: args.checkIn,
-                  checkOutDate: args.checkOut,
-                  adults: 1,
-                  currencyCode: 'USD'
-                });
-                if (data && data.length) {
+              if (hIds.length === 0) {
+                result = "No hotels found for this city.";
+              } else {
+                // 3. Get offers in chunks to avoid URL-length and small-sample bias
+                const merged = [];
+                for (const idChunk of chunkArray(hIds, 25)) {
+                  try {
+                    const { data = [] } = await amadeus.shopping.hotelOffersSearch.get({
+                      hotelIds: idChunk.join(","),
+                      checkInDate: checkIn,
+                      checkOutDate: checkOut,
+                      adults: 1,
+                      currencyCode: "USD",
+                      sort: "PRICE",
+                      "page[limit]": 50,
+                    });
+                    if (Array.isArray(data) && data.length > 0) merged.push(...data);
+                  } catch (chunkErr) {
+                    logError(reqId, "Amadeus Hotel chunk error", chunkErr?.message || chunkErr);
+                  }
+                }
+
+                const byHotel = new Map();
+                for (const hotelItem of merged) {
+                  const bestOffer = pickBestOffer(hotelItem, checkIn, checkOut);
+                  const total = getOfferTotal(bestOffer);
+                  if (!bestOffer || total <= 0) continue;
+                  const hotelId = sanitizeText(hotelItem?.hotel?.hotelId || hotelItem?.hotel?.name);
+                  if (!hotelId) continue;
+
+                  const candidate = {
+                    hotelId,
+                    name: hotelItem?.hotel?.name || "Hotel",
+                    rating: Number(hotelItem?.hotel?.rating || 0),
+                    total,
+                    offer: bestOffer,
+                  };
+
+                  const prev = byHotel.get(hotelId);
+                  if (!prev || candidate.total < prev.total) byHotel.set(hotelId, candidate);
+                }
+
+                const budgetMode = sanitizeText(mem?.profile?.budget?.prefer_comfort_or_saving || "balanced").toLowerCase();
+                const ranked = selectHotelsByBudgetMode(Array.from(byHotel.values()), budgetMode, 8);
+
+                if (ranked.length > 0) {
                   const lines = await Promise.all(
-                    data.slice(0, 5).map(async (h) => {
-                      const price = h.offers?.[0]?.price?.total;
-                      const name = h.hotel?.name;
+                    ranked.map(async (h) => {
                       const affLink = await createAffiliateLink({
-                        hotelName: name,
-                        city: args.city,
-                        checkIn: args.checkIn,
-                        checkOut: args.checkOut,
+                        hotelName: h.name,
+                        city: cityRaw,
+                        checkIn,
+                        checkOut,
                         reqId,
                       });
-                      return `Hotel ${name} (${h.hotel?.hotelId}): $${price} total. Book here: ${affLink}`;
+                      const ratingPart = h.rating > 0 ? `, rating ${h.rating}` : "";
+                      return `Hotel ${h.name} (${h.hotelId}): from $${h.total.toFixed(2)} total for ${checkIn} to ${checkOut}${ratingPart}. Book here: ${affLink}`;
                     })
                   );
-                  result = lines.join('\n');
+                  const modeLine =
+                    budgetMode === "comfort"
+                      ? "Preference mode: comfort (higher-rated options first, still price-aware)."
+                      : budgetMode === "saving" || budgetMode === "budget"
+                        ? "Preference mode: budget (lowest-price options first)."
+                        : "Preference mode: balanced (mix of value picks and well-rated stays).";
+                  result = `${modeLine}\n${lines.join("\n")}`;
+                } else {
+                  result = `No hotels with confirmed pricing were found for ${cityRaw} from ${checkIn} to ${checkOut}.`;
                 }
-              } else {
-                result = "Could not resolve city code.";
               }
             }
           } catch (e) {
