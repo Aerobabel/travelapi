@@ -104,6 +104,12 @@ function getMem(userId) {
         liked_activities: [],
         multi_cities: [],
       },
+      lastFlights: [],
+      lastHotels: [],
+      lastActivities: [],
+      lastRestaurants: [],
+      lastHotelSearch: null,
+      lastActivitySearch: null,
     });
   }
   return userMem.get(userId);
@@ -356,6 +362,250 @@ function ensureWeather(plan) {
 
 // --- 2.1 AFFILIATE HELPERS ------------------------------------------------
 const sanitizeText = (val) => String(val || "").trim();
+const ACTIVITY_PROVIDER_HOSTS = [
+  "getyourguide.com",
+  "viator.com",
+  "headout.com",
+  "tiqets.com",
+  "klook.com",
+];
+const LOOKUP_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "this",
+  "that",
+  "your",
+  "their",
+  "tour",
+  "tours",
+  "activity",
+  "activities",
+  "ticket",
+  "tickets",
+  "experience",
+  "experiences",
+  "things",
+  "must",
+  "best",
+  "book",
+]);
+
+function escapeRegExp(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeLookupText(value = "") {
+  return sanitizeText(value)
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[_/]/g, " ")
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeLookupText(value = "") {
+  return normalizeLookupText(value)
+    .split(" ")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 2 && !LOOKUP_STOPWORDS.has(part));
+}
+
+function prettifyProviderSlug(slug = "") {
+  const cleaned = sanitizeText(slug);
+  if (!cleaned) return "";
+  return cleaned
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function providerFromUrl(rawUrl = "") {
+  const candidate = sanitizeText(rawUrl);
+  if (!candidate) return "";
+  try {
+    const host = new URL(candidate).hostname.replace(/^www\./i, "").toLowerCase();
+    if (host.includes("getyourguide")) return "GetYourGuide";
+    if (host.includes("viator")) return "Viator";
+    if (host.includes("headout")) return "Headout";
+    if (host.includes("tiqets")) return "Tiqets";
+    if (host.includes("klook")) return "Klook";
+    const parts = host.split(".");
+    const slug = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+    return prettifyProviderSlug(slug);
+  } catch (e) {
+    return "";
+  }
+}
+
+function isKnownActivityProviderName(value = "") {
+  const lower = sanitizeText(value).toLowerCase();
+  return ["getyourguide", "viator", "headout", "tiqets", "klook"].some((name) =>
+    lower.includes(name)
+  );
+}
+
+function stripActivitySiteSuffix(title = "", provider = "") {
+  let cleaned = sanitizeText(title);
+  if (!cleaned) return "";
+
+  const providerPattern = sanitizeText(provider)
+    ? new RegExp(
+      `\\s*(?:\\||-|–|—|•)\\s*${escapeRegExp(sanitizeText(provider))}(?:\\s+.*)?$`,
+      "i"
+    )
+    : null;
+
+  if (providerPattern) cleaned = cleaned.replace(providerPattern, "").trim();
+  cleaned = cleaned
+    .replace(/\s*(?:\||-|–|—|•)\s*(GetYourGuide|Viator|Headout|Tiqets|Klook)(?:\s+.*)?$/i, "")
+    .trim();
+
+  return cleaned;
+}
+
+function isGenericProviderHomepage(rawUrl = "") {
+  const candidate = sanitizeText(rawUrl);
+  if (!candidate) return true;
+
+  try {
+    const parsed = new URL(candidate);
+    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+    const segments = (parsed.pathname || "/").split("/").filter(Boolean);
+
+    if (host.includes("getyourguide")) {
+      return (
+        segments.length === 0 ||
+        (segments.length === 1 && /^[a-z]{2}(?:-[a-z]{2})?$/i.test(segments[0]))
+      );
+    }
+
+    if (
+      host.includes("viator") ||
+      host.includes("headout") ||
+      host.includes("tiqets") ||
+      host.includes("klook")
+    ) {
+      return segments.length === 0;
+    }
+
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+function parseActivitiesSearchQuery(rawQuery = "") {
+  const cleaned = sanitizeText(String(rawQuery || "").replace("__activities__", ""));
+  if (!cleaned) {
+    return { location: "", intent: "", specific: false, raw: "" };
+  }
+
+  const parts = cleaned
+    .split(/\s*(?:\||::|>>)\s*/)
+    .map((part) => sanitizeText(part))
+    .filter(Boolean);
+  if (parts.length >= 2) {
+    return {
+      location: parts[0],
+      intent: parts.slice(1).join(" "),
+      specific: true,
+      raw: cleaned,
+    };
+  }
+
+  const naturalMatch = /^(?<intent>.+?)\s+(?:in|at|near)\s+(?<location>[a-z0-9][a-z0-9\s,'-]{1,})$/i.exec(
+    cleaned
+  );
+  if (naturalMatch?.groups?.intent && naturalMatch?.groups?.location) {
+    return {
+      location: sanitizeText(naturalMatch.groups.location),
+      intent: sanitizeText(naturalMatch.groups.intent),
+      specific: true,
+      raw: cleaned,
+    };
+  }
+
+  return { location: cleaned, intent: "", specific: false, raw: cleaned };
+}
+
+async function fetchSerpJson(params = {}, reqId = "") {
+  const url = `https://serpapi.com/search.json?${new URLSearchParams({
+    api_key: SERPAPI_KEY,
+    ...params,
+  }).toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const raw = await res.text().catch(() => "");
+    logError(reqId || "n/a", `[SerpAPI ${res.status}]`, raw.slice(0, 200));
+    throw new Error(`SerpAPI request failed with status ${res.status}`);
+  }
+  return await res.json();
+}
+
+function dedupeActivityResults(results = []) {
+  const seen = new Set();
+  const out = [];
+
+  for (const entry of Array.isArray(results) ? results : []) {
+    if (!entry) continue;
+    const provider = sanitizeText(entry.provider);
+    const title = stripActivitySiteSuffix(entry.title, provider);
+    const key = normalizeLookupText(`${title} ${provider}`);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...entry, title });
+  }
+
+  return out;
+}
+
+function pickActivityFromMemory(activityLikeText = "", activities = []) {
+  if (!Array.isArray(activities) || activities.length === 0) return null;
+
+  const candidate = sanitizeText(activityLikeText);
+  const candidateNorm = normalizeLookupText(candidate);
+  const candidateTokens = new Set(tokenizeLookupText(candidate));
+  if (!candidateNorm && candidateTokens.size === 0) return null;
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const activity of activities) {
+    const title = stripActivitySiteSuffix(activity?.title || "", activity?.provider || "");
+    const activityText = [title, activity?.description, activity?.provider, activity?.type]
+      .filter(Boolean)
+      .join(" ");
+    const titleNorm = normalizeLookupText(title);
+    const activityTokens = new Set(tokenizeLookupText(activityText));
+    if (!titleNorm && activityTokens.size === 0) continue;
+
+    let score = 0;
+    if (titleNorm && candidateNorm && (candidateNorm.includes(titleNorm) || titleNorm.includes(candidateNorm))) {
+      score += 8;
+    }
+
+    let overlap = 0;
+    for (const token of candidateTokens) {
+      if (activityTokens.has(token)) overlap += 1;
+    }
+    score += overlap;
+
+    if (activity?.booking_url && !isGenericProviderHomepage(activity.booking_url)) score += 0.5;
+    if (activity?.source === "organic") score += 0.5;
+
+    if (score > bestScore) {
+      best = { ...activity, title };
+      bestScore = score;
+    }
+  }
+
+  return bestScore >= 2 ? best : null;
+}
 
 function formatZenDate(input) {
   const raw = sanitizeText(input);
@@ -1086,11 +1336,12 @@ async function performGoogleSearch(rawQuery, reqId) {
     // --- RESTAURANTS ---
     if (startsWith("__restaurants__")) {
       const loc = query.replace("__restaurants__", "").trim();
-      const url = `https://serpapi.com/search.json?engine=google_local&q=${encodeURIComponent(
-        loc + " best restaurants"
-      )}&hl=en&type=search&api_key=${SERPAPI_KEY}`;
-
-      const data = await fetch(url).then((r) => r.json());
+      const data = await fetchSerpJson({
+        engine: "google_local",
+        q: loc + " best restaurants",
+        hl: "en",
+        type: "search",
+      }, reqId);
       const base = data.local_results || data.places || [];
       const results = base.slice(0, 7).map((r) => ({
         title: r.title,
@@ -1112,11 +1363,11 @@ async function performGoogleSearch(rawQuery, reqId) {
     // --- FLIGHTS ---
     if (startsWith("__flights__")) {
       const cleaned = query.replace("__flights__", "").trim();
-      const url = `https://serpapi.com/search.json?engine=google_flights&q=${encodeURIComponent(
-        cleaned
-      )}&currency=USD&api_key=${SERPAPI_KEY}`;
-
-      const data = await fetch(url).then((r) => r.json());
+      const data = await fetchSerpJson({
+        engine: "google_flights",
+        q: cleaned,
+        currency: "USD",
+      }, reqId);
       const flights = data.best_flights || data.other_flights || [];
       const simplerFlights = flights.slice(0, 5).map((f) => {
         const leg = (f.flights && f.flights[0]) || {};
@@ -1148,30 +1399,83 @@ async function performGoogleSearch(rawQuery, reqId) {
 
     // --- ACTIVITIES ---
     if (startsWith("__activities__")) {
-      const loc = query.replace("__activities__", "").trim();
-      const url = `https://serpapi.com/search.json?engine=google_local&q=${encodeURIComponent(
-        loc + " must do things"
-      )}&hl=en&type=search&api_key=${SERPAPI_KEY}`;
+      const parsed = parseActivitiesSearchQuery(query);
+      const location = parsed.location;
+      const intent = parsed.intent;
+      const specific = parsed.specific;
 
-      const data = await fetch(url).then((r) => r.json());
-      const base = data.local_results || data.places || [];
-      const results = base.slice(0, 10).map((r) => ({
+      const localQuery = specific && intent
+        ? `${intent} in ${location}`
+        : `${location} must do things`;
+
+      const organicQueries = specific && intent
+        ? [
+          `${intent} ${location} site:getyourguide.com OR site:viator.com OR site:headout.com OR site:tiqets.com OR site:klook.com`,
+          `${intent} ${location}`,
+        ]
+        : [
+          `${location} tours site:getyourguide.com OR site:viator.com OR site:headout.com`,
+        ];
+
+      const [localData, ...organicPayloads] = await Promise.all([
+        fetchSerpJson({
+          engine: "google_local",
+          q: localQuery,
+          hl: "en",
+          type: "search",
+        }, reqId).catch(() => null),
+        ...organicQueries.map((q) =>
+          fetchSerpJson({ q, hl: "en", num: "10" }, reqId).catch(() => null)
+        ),
+      ]);
+
+      const localBase = localData?.local_results || localData?.places || [];
+      const localResults = localBase.slice(0, specific ? 6 : 10).map((r) => ({
         title: r.title,
-        type: r.type,
+        type: r.type || "activity",
         rating: r.rating,
         description: r.description,
         latitude: r.gps_coordinates?.latitude,
         longitude: r.gps_coordinates?.longitude,
+        source: "local",
       }));
+
+      const organicResults = [];
+      for (const payload of organicPayloads) {
+        const rows = Array.isArray(payload?.organic_results) ? payload.organic_results : [];
+        for (const r of rows) {
+          const bookingUrl = sanitizeText(r?.link || "");
+          const bookingUrlLower = bookingUrl.toLowerCase();
+          const provider = providerFromUrl(bookingUrl);
+          if (
+            specific &&
+            (!bookingUrl ||
+              !ACTIVITY_PROVIDER_HOSTS.some((host) => bookingUrlLower.includes(host)))
+          ) {
+            continue;
+          }
+          organicResults.push({
+            title: stripActivitySiteSuffix(r?.title || "", provider),
+            type: specific ? "bookable_tour" : "activity",
+            rating: null,
+            description: r?.snippet,
+            provider,
+            booking_url: bookingUrl,
+            source: "organic",
+          });
+        }
+        if (specific && organicResults.length > 0) break;
+      }
+
+      const results = dedupeActivityResults(
+        specific ? [...organicResults, ...localResults] : [...organicResults, ...localResults]
+      ).slice(0, 10);
+
       return JSON.stringify(results);
     }
 
     // --- FALLBACK ---
-    const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
-      query
-    )}&api_key=${SERPAPI_KEY}&num=8`;
-    const res = await fetch(url);
-    const data = await res.json();
+    const data = await fetchSerpJson({ q: query, num: "8" }, reqId);
 
     const out = [];
     if (data.organic_results) {
@@ -1299,7 +1603,7 @@ const tools = [
     function: {
       name: "search_google",
       description:
-        "Search Google for restaurants or activities only. Use prefixes: '__restaurants__ Rome', '__activities__ Tokyo'. Do not use this tool for flights or hotels.",
+        "Search Google for restaurants or activities only. Use prefixes: '__restaurants__ Rome', '__activities__ Tokyo'. If the user wants a specific tour/activity, use '__activities__ DESTINATION | SPECIFIC REQUEST' (example: '__activities__ Dubai | helicopter ride'). Do not use this tool for flights or hotels.",
       parameters: {
         type: "object",
         properties: {
@@ -1405,6 +1709,10 @@ const tools = [
                       approxPrice: { type: "number" },
                       latitude: { type: "number" },
                       longitude: { type: "number" },
+                      booking_url: {
+                        type: "string",
+                        description: "Direct booking page for the exact event when available. Avoid generic provider homepages.",
+                      },
                     },
                     required: ["type", "title", "details", "provider"],
                   },
@@ -1424,7 +1732,7 @@ const tools = [
                 price: { type: "number" },
                 iconType: { type: "string" },
                 iconValue: { type: "string" },
-                booking_url: { type: "string", description: "Official homepage or booking deep link e.g. 'https://wizzair.com'. NO generic searches." },
+                booking_url: { type: "string", description: "Official homepage or direct booking deep link. For tours/activities, prefer the exact attraction page over a provider homepage." },
               },
             },
           },
@@ -1554,6 +1862,8 @@ Your goal:
     - "balanced" -> include a mix of value and quality, not only the cheapest.
 - Use **real restaurants and activities**:
   - Real venue/tour names, taken from search results.
+  - If the user asks for a specific tour or attraction, search it explicitly using \`__activities__ DESTINATION | SPECIFIC REQUEST\` so you can surface direct booking pages.
+  - Prefer direct deep links to the exact activity page (GetYourGuide/Viator/etc.), not provider homepages.
   - **CRITICAL:** Search for "hidden gems", "local favorites", "best kept secrets", and "unique experiences".
   - **DIVERSITY:** Ensure the plan has a mix of culture, culinary, relaxation, and active elements.
   - **LOGISTICS:** Group activities by neighborhood to minimize travel time. Don't zigzag across the city.
@@ -1585,6 +1895,7 @@ When you call \`create_plan\`:
 
   - Use attraction or tour names from \`__activities__\` results or your best known real-world names.
   - **CRITICAL**: If the search results provided 'latitude' and 'longitude', you MUST include them in the event object.
+  - If the search results provided a \`booking_url\` for the exact activity, include that deep link in the event or cost breakdown instead of a generic provider homepage.
 
 - Cost Breakdown (\`costBreakdown\`):
   - You MUST explicitly include these items if valid for the trip:
@@ -1592,6 +1903,7 @@ When you call \`create_plan\`:
     - "Insurance" (e.g. "Medical Insurance", "Visa Insurance") -> Provider "Axa" or "Allianz".
     - "Excursions" (e.g. "City Tour", "Museum Ticket") -> Provider "GetYourGuide" or local.
   - Make sure to assign realistic prices to them.
+  - If a searched excursion has a direct \`booking_url\`, pass that link through to the relevant excursion line item.
 
 >>> HARD RULE: NO TEXT-ONLY FULL ITINERARIES <<<
 - You are FORBIDDEN from writing a full day-by-day itinerary in normal chat messages.
@@ -1738,6 +2050,33 @@ router.post("/travel", async (req, res) => {
         // A. SEARCH -> recurse
         if (toolName === "search_google") {
           const result = await performGoogleSearch(args.query, reqId);
+          const searchQuery = sanitizeText(args.query);
+          if (searchQuery.startsWith("__activities__")) {
+            try {
+              const parsed = JSON.parse(result);
+              mem.lastActivities = Array.isArray(parsed)
+                ? parsed
+                  .filter((row) => sanitizeText(row?.title))
+                  .map((row) => ({
+                    ...row,
+                    title: stripActivitySiteSuffix(row.title, row.provider),
+                  }))
+                : [];
+              mem.lastActivitySearch = {
+                query: searchQuery,
+                at: new Date().toISOString(),
+              };
+            } catch (e) {
+              mem.lastActivities = [];
+            }
+          } else if (searchQuery.startsWith("__restaurants__")) {
+            try {
+              const parsed = JSON.parse(result);
+              mem.lastRestaurants = Array.isArray(parsed) ? parsed : [];
+            } catch (e) {
+              mem.lastRestaurants = [];
+            }
+          }
           newHistory.push({
             role: "tool",
             tool_call_id: toolCall.id,
@@ -2065,7 +2404,24 @@ router.post("/travel", async (req, res) => {
               day.events.forEach((ev, idx) => {
                 if (!ev.time) ev.time = ["09:00", "13:00", "17:00", "20:00"][idx] || "10:00";
                 if (!ev.duration) ev.duration = "2h";
-                // Check for hotels in itinerary events (optional: link them too?)
+                if (ev.type === "activity") {
+                  const matchedActivity = pickActivityFromMemory(
+                    [ev.title, ev.details, ev.provider].filter(Boolean).join(" "),
+                    mem?.lastActivities || []
+                  );
+                  if (matchedActivity) {
+                    if ((!ev.booking_url || isGenericProviderHomepage(ev.booking_url)) && matchedActivity.booking_url) {
+                      ev.booking_url = matchedActivity.booking_url;
+                    }
+                    if ((!ev.provider || isKnownActivityProviderName(ev.provider)) && matchedActivity.provider) {
+                      ev.provider = matchedActivity.provider;
+                    }
+                    const lat = Number(matchedActivity.latitude);
+                    const lng = Number(matchedActivity.longitude);
+                    if (!Number.isFinite(Number(ev.latitude)) && Number.isFinite(lat)) ev.latitude = lat;
+                    if (!Number.isFinite(Number(ev.longitude)) && Number.isFinite(lng)) ev.longitude = lng;
+                  }
+                }
               });
             }
           });
@@ -2104,6 +2460,7 @@ router.post("/travel", async (req, res) => {
           for (const item of plan.costBreakdown) {
             const lowerItem = (item.item || "").toLowerCase();
             const lowerProv = (item.provider || "").toLowerCase();
+            const lowerDetails = (item.details || "").toLowerCase();
             const isAirbnb = lowerProv.includes("airbnb");
             const isHotelLike =
               !isAirbnb &&
@@ -2116,6 +2473,12 @@ router.post("/travel", async (req, res) => {
                 lowerItem.includes("stay") ||
                 lowerItem.includes("accommodation")
               );
+            const matchedActivity = pickActivityFromMemory(
+              [item.item, item.details, item.provider].filter(Boolean).join(" "),
+              mem?.lastActivities || []
+            );
+            const needsSpecificActivityLink =
+              !item.booking_url || isGenericProviderHomepage(item.booking_url);
 
             if (isHotelLike) {
               const matchedHotel = pickHotelFromMemory(item.provider || item.item, mem?.lastHotels || []);
@@ -2138,7 +2501,45 @@ router.post("/travel", async (req, res) => {
                 hotelId: matchedHotel?.hotelId || null,
                 reqId,
               });
-            } else if (!item.booking_url) {
+            } else {
+              if (
+                matchedActivity &&
+                needsSpecificActivityLink &&
+                matchedActivity.booking_url
+              ) {
+                item.booking_url = matchedActivity.booking_url;
+              }
+              if (
+                matchedActivity &&
+                (!item.provider || isKnownActivityProviderName(item.provider)) &&
+                matchedActivity.provider
+              ) {
+                item.provider = matchedActivity.provider;
+              }
+              if (!item.details && matchedActivity?.description) {
+                item.details = matchedActivity.description;
+              }
+
+              if (
+                !item.booking_url &&
+                matchedActivity &&
+                (lowerProv.includes("getyourguide") ||
+                  lowerProv.includes("viator") ||
+                  lowerProv.includes("headout") ||
+                  lowerProv.includes("tiqets") ||
+                  lowerProv.includes("klook") ||
+                  lowerItem.includes("tour") ||
+                  lowerItem.includes("ticket") ||
+                  lowerItem.includes("excursion") ||
+                  lowerDetails.includes("tour") ||
+                  lowerDetails.includes("ticket") ||
+                  lowerDetails.includes("excursion"))
+              ) {
+                item.booking_url = matchedActivity.booking_url || item.booking_url;
+              }
+            }
+
+            if (!item.booking_url) {
               if (lowerProv.includes("gettransfer") || lowerItem.includes("transfer")) item.booking_url = "https://gettransfer.com";
               else if (lowerProv.includes("axa")) item.booking_url = "https://www.axa-schengen.com";
               else if (lowerProv.includes("allianz")) item.booking_url = "https://www.allianz-travel.com";
