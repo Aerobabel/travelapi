@@ -117,6 +117,21 @@ function getMem(userId) {
 
 // --- 2. HELPERS -------------------------------------------------------------
 
+/** Strip markdown formatting from AI text so the mobile app gets clean plain text. */
+const stripMarkdown = (text) => {
+  if (!text || typeof text !== "string") return text;
+  return text
+    .replace(/\*\*\*(.*?)\*\*\*/g, "$1")   // ***bold italic***
+    .replace(/\*\*(.*?)\*\*/g, "$1")        // **bold**
+    .replace(/\*(.*?)\*/g, "$1")            // *italic*
+    .replace(/^#{1,4}\s+/gm, "")            // ### headers
+    .replace(/^[-*]\s+/gm, "• ")            // - bullets → •
+    .replace(/^---+$/gm, "")                // --- horizontal rules
+    .replace(/`([^`]+)`/g, "$1")            // `inline code`
+    .replace(/\n{3,}/g, "\n\n")             // collapse triple+ newlines
+    .trim();
+};
+
 const getCode = (label) => {
   if (!label) return null;
   const s = String(label).trim();
@@ -1617,13 +1632,14 @@ const tools = [
     type: "function",
     function: {
       name: "search_flights",
-      description: "Search for real flights using Amadeus. Dates must be YYYY-MM-DD.",
+      description: "Search for real flights using Amadeus. Always include return_date for round-trip pricing (much cheaper). Results are sorted cheapest-first.",
       parameters: {
         type: "object",
         properties: {
           origin: { type: "string", description: "IATA code (e.g. LON, NYC) or City Name" },
           destination: { type: "string", description: "IATA code (e.g. PAR, TYO) or City Name" },
-          date: { type: "string", description: "YYYY-MM-DD" },
+          date: { type: "string", description: "Departure date YYYY-MM-DD" },
+          return_date: { type: "string", description: "Return date YYYY-MM-DD. ALWAYS provide for round-trip." },
         },
         required: ["origin", "destination", "date"],
       },
@@ -1837,6 +1853,8 @@ When you have:
 
 You MUST:
 - Call \`search_flights\` for flight options (origin/dest can be city names, I'll convert them).
+  - ALWAYS provide return_date to get round-trip pricing (much cheaper than one-way).
+  - Prioritize the CHEAPEST realistic options for the user.
 - Call \`search_hotels\` for accommodation.
 - Call \`search_google\` ONLY for:
   - "__restaurants__ DESTINATION"
@@ -1921,17 +1939,27 @@ As soon as you have:
 - at least one realistic hotel option
 - a set of 4–8 good activities/places
 
-You MUST:
-- Stop explaining the trip in detail.
-- Say a very short message like: "Great, I'll build a plan for you now."
-- Immediately call \`create_plan\` and put ALL day-by-day details into the tool payload instead of the chat text.
+You MUST call \`create_plan\` IMMEDIATELY in that SAME assistant message.
+- Do NOT send a message like "I'll build a plan now" or "Let me put this together" WITHOUT also calling the tool in that same message.
+- Do NOT wait for the user to say "go on", "continue", or confirm before calling the tool.
+- The tool call and any short text MUST be in the SAME assistant turn. Never announce it in one message and build it in the next.
+- If you have enough data, just call \`create_plan\` right away. No preamble needed.
 
 =====================================
-CHAT STYLE
+CHAT STYLE & FORMATTING
 =====================================
 - Messages must be short and conversational (WhatsApp-style).
 - Do NOT dump long essays.
 - Never print long bullet lists of activities in normal chat when you could instead finalize a plan via \`create_plan\`.
+
+>>> CRITICAL: NO MARKDOWN FORMATTING <<<
+- NEVER use asterisks (*) for bold, italic, or emphasis. Write plain text only.
+- NEVER use markdown: no **, no *, no ##, no ---, no backticks, no bullet lists with -.
+- Write like you're texting a friend on WhatsApp. Clean, natural, easy to read.
+- To separate points, use line breaks — not bullets, headers, or numbered lists.
+- Wrong: "**Paris** is a *great* choice! Here's what I found:"
+- Right: "Paris is a great choice! Here's what I found:"
+- If listing a few things, use simple line breaks or commas, not formatted lists.
 
 =====================================
 TOOLS AND ORDER (ONE TOOL PER MESSAGE)
@@ -2089,47 +2117,62 @@ router.post("/travel", async (req, res) => {
         if (toolName === "search_flights") {
           let result = "No flights found.";
           try {
-            // Resolve IATA
             const originCode = getCode(args.origin) || args.origin.toUpperCase();
             const destCode = getCode(args.destination) || args.destination.toUpperCase();
-            // Simple search
+
+            // Build origin-destinations (round-trip if return_date provided)
+            const originDestinations = [
+              {
+                id: '1',
+                originLocationCode: originCode,
+                destinationLocationCode: destCode,
+                departureDateTimeRange: { date: args.date }
+              }
+            ];
+            if (args.return_date) {
+              originDestinations.push({
+                id: '2',
+                originLocationCode: destCode,
+                destinationLocationCode: originCode,
+                departureDateTimeRange: { date: args.return_date }
+              });
+            }
+
             const response = await amadeus.shopping.flightOffersSearch.post(JSON.stringify({
               currencyCode: 'USD',
-              originDestinations: [
-                {
-                  id: '1',
-                  originLocationCode: originCode,
-                  destinationLocationCode: destCode,
-                  departureDateTimeRange: { date: args.date }
-                }
-              ],
+              originDestinations,
               travelers: [{ id: '1', travelerType: 'ADULT' }],
-              sources: ['GDS']
+              sources: ['GDS'],
+              searchCriteria: {
+                maxFlightOffers: 20,
+                flightFilters: {
+                  cabinRestrictions: [{
+                    cabin: "ECONOMY",
+                    coverage: "MOST_SEGMENTS",
+                    originDestinationIds: ["1"]
+                  }]
+                }
+              }
             }));
             const data = response.data;
             const dictionaries = response.result?.dictionaries || {};
 
-            const offers = data ? data.slice(0, 5) : [];
-            if (offers.length) {
-              // 1. Convert to structured objects
-              const structured = offers.map(o => normalizeOffer(o, dictionaries));
-              // 2. Save to memory for fallback
-              mem.lastFlights = structured;
+            // Sort by price ascending to surface cheapest options first
+            const sorted = (data || [])
+              .map(o => normalizeOffer(o, dictionaries))
+              .sort((a, b) => (a.price || 9999) - (b.price || 9999));
 
-              // 3. Convert to string for LLM
-              result = structured.map(n => {
-                const route = `${n.origin || args.origin}->${n.destination || args.destination}`;
-                // Wait, n.origin/dest might be missing in normalizeOffer if we rely on route parsing?
-                // normalizeOffer sets depart/arrive as times. It doesn't set origin/dest codes yet?
-                // Let's check normalizeOffer. It has layover, stops, airline...
-                // Actually normalizeOffer returns `depart`, `arrive`, `stops`, `layover`, `airline`, `flightNumber`.
-                // It does NOT return `origin` or `destination` codes explicitly? 
-                // Let's check line 1067 of chat.routes.js: `origin: origin || f0.departure_airport_code`. 
-                // In my previous edits I added `departDate`? Yes.
+            const top = sorted.slice(0, 10);
+            if (top.length) {
+              mem.lastFlights = top;
 
-                const stopsPart = n.stops === 0 ? "Direct" : `${n.stops} stops`;
-                return `Flight ${n.flightNumber} (${n.airline}) ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart}) for $${n.price}`;
+              result = top.map((n, i) => {
+                const route = `${n.origin || originCode}->${n.destination || destCode}`;
+                const stopsPart = n.stops === 0 ? "Direct" : `${n.stops} stop${n.stops > 1 ? 's' : ''}`;
+                const retPart = n.isRoundTrip ? " (round-trip)" : "";
+                return `${i + 1}. ${n.airline} ${n.flightNumber} ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart})${retPart} — $${n.price}`;
               }).join('\n');
+              result = `Found ${sorted.length} options. Top ${top.length} cheapest:\n${result}`;
             }
           } catch (e) {
             result = `Flight search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
@@ -2634,6 +2677,28 @@ router.post("/travel", async (req, res) => {
         };
       }
 
+      // Guardrail: if model announces plan building without actually calling create_plan, force it
+      const looksLikePlanAnnouncement =
+        lower.includes("build") && lower.includes("plan") ||
+        lower.includes("putting together") && lower.includes("plan") ||
+        lower.includes("crafting") && lower.includes("plan") ||
+        lower.includes("creating") && lower.includes("itinerary") ||
+        lower.includes("let me put") && lower.includes("together");
+
+      if (looksLikePlanAnnouncement && depth < 7) {
+        logInfo(reqId, "[Guardrail] Intercepted plan announcement without tool call. Forcing create_plan.");
+        const newConversation = [
+          ...conversation,
+          msg,
+          {
+            role: "system",
+            content:
+              "SYSTEM INTERVENTION: You just announced you'd build a plan but did NOT call the create_plan tool. You MUST call create_plan NOW in this very message. Do not reply with text — call the tool immediately with all the data you have.",
+          },
+        ];
+        return runConversation(newConversation, depth + 1);
+      }
+
       // Anti-dump: shorten overly long messages
       if (typeof text === "string" && text.length > 600) {
         text = text.slice(0, 580) + "…";
@@ -2643,6 +2708,7 @@ router.post("/travel", async (req, res) => {
     };
 
     const response = await runConversation(baseHistory);
+    if (response.aiText) response.aiText = stripMarkdown(response.aiText);
     return res.json(response);
   } catch (err) {
     logError(reqId, "Route Error", err);
