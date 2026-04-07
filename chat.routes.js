@@ -1632,14 +1632,14 @@ const tools = [
     type: "function",
     function: {
       name: "search_flights",
-      description: "Search for real flights using Amadeus. Always include return_date for round-trip pricing (much cheaper). Results are sorted cheapest-first.",
+      description: "Search for real flights using Amadeus. Use return_date only when the user wants a round-trip. Omit return_date for one-way searches. Results are sorted cheapest-first.",
       parameters: {
         type: "object",
         properties: {
           origin: { type: "string", description: "IATA code (e.g. LON, NYC) or City Name" },
           destination: { type: "string", description: "IATA code (e.g. PAR, TYO) or City Name" },
           date: { type: "string", description: "Departure date YYYY-MM-DD" },
-          return_date: { type: "string", description: "Return date YYYY-MM-DD. ALWAYS provide for round-trip." },
+          return_date: { type: "string", description: "Optional return date YYYY-MM-DD. Provide it only for round-trip searches." },
         },
         required: ["origin", "destination", "date"],
       },
@@ -1857,7 +1857,10 @@ When you have:
 
 You MUST:
 - Call \`search_flights\` for flight options (origin/dest can be city names, I'll convert them).
-  - ALWAYS provide return_date to get round-trip pricing (much cheaper than one-way).
+  - If the user wants a round-trip and the return date is known, provide \`return_date\`.
+  - If the user wants a one-way ticket, search without \`return_date\`.
+  - NEVER claim that one-way tickets are unsupported or impossible to search.
+  - Do NOT invent or force a return date when the user asked for one-way.
   - Prioritize the CHEAPEST realistic options for the user.
 - Call \`search_hotels\` for accommodation.
 - Call \`search_google\` ONLY for:
