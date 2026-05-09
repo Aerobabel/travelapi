@@ -286,19 +286,80 @@ const extractMultiCities = (text = "") => {
   return parts.length > 1 ? parts : [];
 };
 
+function messageText(m = {}) {
+  if (typeof m.content === "string") return m.content;
+  if (Array.isArray(m.content)) {
+    const t = m.content.find((c) => c.type === "text");
+    if (t) return t.text || "";
+  }
+  if (m.text) return m.text;
+  return "";
+}
+
+function parseGuestCountsFromText(text = "") {
+  const raw = String(text || "");
+  const matches = [
+    raw.match(/guests:\s*(\d+)\s*adult(?:\(s\))?\s*,\s*(\d+)\s*child(?:\(ren\))?/i),
+    raw.match(/there will be\s*(\d+)\s*adult(?:\(s\))?\s*and\s*(\d+)\s*child(?:\(ren\))?/i),
+    raw.match(/(?:number of people|people|travellers|travelers|guests)\s*(?:is|are|to|=|:)?\s*(\d+)/i),
+    raw.match(/\b(?:we are|we're|for)\s*(\d+)\s*(?:people|travellers|travelers|guests|adults|friends)\b/i),
+    raw.match(/\b(\d+)\s*(?:people|travellers|travelers|guests|adults|friends)\b/i),
+    raw.match(/\b(\d+)\s*adult(?:\(s\))?(?:\s*(?:,|and)\s*(\d+)\s*child(?:\(ren\))?)?/i),
+    raw.trim().match(/^\D*(\d{1,2})\D*$/),
+  ].filter(Boolean);
+
+  const match = matches[0];
+  if (!match?.[1]) return null;
+  const adults = Number(match[1]);
+  const children = Number(match[2] || 0);
+  if (!Number.isFinite(adults) || adults <= 0) return null;
+  return {
+    adults: Math.floor(adults),
+    children: Number.isFinite(children) && children > 0 ? Math.floor(children) : 0,
+  };
+}
+
+function profileHasGuests(profile = {}) {
+  const adults = Number(profile?.guest_counts?.adults);
+  return Number.isFinite(adults) && adults > 0;
+}
+
+function applySystemContextToMemory(messages = [], mem) {
+  if (!mem?.profile) return;
+  const contextMessages = messages
+    .filter((m) => m.role === "system")
+    .map(messageText)
+    .filter((text) => /^\[SYSTEM_CONTEXT\]/.test(String(text || "")));
+
+  for (const text of contextMessages) {
+    const jsonStart = text.indexOf("{");
+    if (jsonStart < 0) continue;
+    try {
+      const plan = JSON.parse(text.slice(jsonStart));
+      mem.lastPlanContext = plan;
+      if (Array.isArray(plan?.costBreakdown)) {
+        const hotels = plan.costBreakdown
+          .filter((item) => /hotel|stay|accommodation/i.test(`${item.item || ""} ${item.provider || ""}`))
+          .map((item) => ({
+            name: item.provider || item.item,
+            total: Number(item.price) || 0,
+            rating: Number(item.rating) || 0,
+            city: plan.location,
+            booking_url: item.booking_url || "",
+          }));
+        if (hotels.length) mem.lastHotels = hotels;
+      }
+    } catch {
+      // Context is best-effort; never block planning on parse failure.
+    }
+  }
+}
+
 function updateProfileFromHistory(messages, mem) {
   const lastUser = messages.filter((m) => m.role === "user").pop();
   if (!lastUser) return;
 
-  let text = "";
-  if (typeof lastUser.content === "string") {
-    text = lastUser.content;
-  } else if (Array.isArray(lastUser.content)) {
-    const t = lastUser.content.find((c) => c.type === "text");
-    if (t) text = t.text || "";
-  } else if (lastUser.text) {
-    text = lastUser.text;
-  }
+  let text = messageText(lastUser);
 
   text = String(text || "");
   const lower = text.toLowerCase();
@@ -342,19 +403,11 @@ function updateProfileFromHistory(messages, mem) {
   if (lower.includes("cheap") || lower.includes("affordable")) {
     profile.budget.prefer_comfort_or_saving = "saving";
   }
-  const guestsMatch =
-    text.match(/guests:\s*(\d+)\s*adult(?:\(s\))?\s*,\s*(\d+)\s*child(?:\(ren\))?/i) ||
-    text.match(/there will be\s*(\d+)\s*adult(?:\(s\))?\s*and\s*(\d+)\s*child(?:\(ren\))?/i) ||
-    text.match(/(\d+)\s*adult(?:\(s\))?(?:\s*(?:,|and)\s*(\d+)\s*child(?:\(ren\))?)?/i);
-  if (guestsMatch?.[1]) {
-    const adults = Number(guestsMatch[1]);
-    const children = Number(guestsMatch[2] || 0);
-    if (Number.isFinite(adults) && adults > 0) {
-      profile.guest_counts = {
-        adults: Math.floor(adults),
-        children: Number.isFinite(children) && children > 0 ? Math.floor(children) : 0,
-      };
-    }
+  const guestSource =
+    parseGuestCountsFromText(text) ||
+    [...messages].reverse().map(messageText).map(parseGuestCountsFromText).find(Boolean);
+  if (guestSource) {
+    profile.guest_counts = guestSource;
   } else if (profile.travel_alone_or_with === "solo") {
     profile.guest_counts = { adults: 1, children: 0 };
   }
@@ -388,6 +441,25 @@ function ensureWeather(plan) {
 
 // --- 2.1 AFFILIATE HELPERS ------------------------------------------------
 const sanitizeText = (val) => String(val || "").trim();
+const eventTextForClassification = (event = {}) =>
+  [event.type, event.icon, event.title, event.details, event.provider]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+function isTransferLikeEvent(event = {}) {
+  const text = eventTextForClassification(event);
+  return /\btransfer\b|\btaxi\b|\bchauffeur\b|\bcar\b|\bdriver\b|\bshuttle\b|\bferry\b|\bboat\b|\bhotel\s+to\s+airport\b|\bto\s+airport\b|\bfrom\s+airport\b/.test(text);
+}
+
+function isFlightLikeEvent(event = {}) {
+  const text = eventTextForClassification(event);
+  if (isTransferLikeEvent(event)) return false;
+  return event.type === "flight" ||
+    event.icon === "flight" ||
+    /\bflight\b|\bairways?\b|\bairlines?\b|\bairport\s*\([A-Z]{3}\)\s*(?:to|->|â†’)/i.test(text);
+}
+
 const ACTIVITY_PROVIDERS = [
   { host: "getyourguide.com", name: "GetYourGuide" },
   { host: "viator.com", name: "Viator" },
@@ -1745,6 +1817,85 @@ function selectHotelsByBudgetMode(candidates = [], budgetMode = "balanced", limi
   return picks;
 }
 
+function nightsBetween(checkIn, checkOut) {
+  const start = new Date(checkIn);
+  const end = new Date(checkOut);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 1;
+  return Math.max(1, Math.round((end - start) / 86400000));
+}
+
+function estimateGoogleHotelTotal(place = {}, checkIn = "", checkOut = "", guests = "") {
+  const nights = nightsBetween(checkIn, checkOut);
+  const guestCount = Math.max(1, Number(String(guests || "1").match(/\d+/)?.[0] || 1));
+  const priceLevel = Number.isFinite(Number(place.priceLevel)) ? Number(place.priceLevel) : 2;
+  const rating = Number(place.rating) || 4;
+  const nightlyBase = 95 + priceLevel * 55 + Math.max(0, rating - 4) * 35;
+  const roomMultiplier = Math.max(1, Math.ceil(guestCount / 2));
+  return Math.round(nightlyBase * nights * roomMultiplier);
+}
+
+async function fallbackGoogleHotelSearch({ city, checkIn, checkOut, guests, limit = 8, reqId = null } = {}) {
+  if (!mapsProvider?.hasPlaces || typeof mapsProvider.findPlaces !== "function") return [];
+  const query = `hotels in ${sanitizeText(city)}`;
+  const places = await mapsProvider.findPlaces(query, { limit, type: "lodging" });
+  return (places || [])
+    .filter((place) => place?.name)
+    .map((place) => ({
+      hotelId: place.placeId || `google-${normalizeHotelName(place.name)}`,
+      hid: null,
+      legacyId: null,
+      regionId: null,
+      name: place.name,
+      total: estimateGoogleHotelTotal(place, checkIn, checkOut, guests),
+      rating: Number(place.rating) || 0,
+      checkIn,
+      checkOut,
+      city,
+      latitude: place.latitude,
+      longitude: place.longitude,
+      address: place.address || "",
+      placeId: place.placeId || null,
+      website: place.website || "",
+      booking_url: place.website || place.googleMapsUrl || "",
+      googleMapsUrl: place.googleMapsUrl || "",
+      source: "google_places_fallback",
+      availability: "not_live_priced",
+    }));
+}
+
+async function buildHotelFallbackResult({ city, checkIn, checkOut, guests, budgetMode, reason, reqId }) {
+  const fallbackHotels = await fallbackGoogleHotelSearch({
+    city,
+    checkIn,
+    checkOut,
+    guests,
+    reqId,
+  });
+  if (!fallbackHotels.length) {
+    return {
+      hotels: [],
+      text: `Live hotel availability did not return bookable properties for ${city} from ${checkIn} to ${checkOut}. Use a flexible hotel search link for ${city} and continue the plan with a hotel placeholder instead of blocking.`,
+    };
+  }
+
+  const ranked = selectHotelsByBudgetMode(fallbackHotels, budgetMode, 8);
+  const lines = ranked.map((h) => {
+    const ratingPart = h.rating > 0 ? `, Google rating ${h.rating}` : "";
+    const addressPart = h.address ? `, ${h.address}` : "";
+    const link = h.booking_url || h.googleMapsUrl;
+    return `Hotel ${h.name} (google_places:${h.placeId || h.hotelId}): estimated from $${h.total.toFixed(2)} total for ${checkIn} to ${checkOut}${ratingPart}${addressPart}. Open here: ${link}`;
+  });
+
+  const text = [
+    `Live hotel availability fallback: ${reason || "provider returned no availability"}.`,
+    "Using verified Google Places hotel options with estimated pricing; do not ask the user to fix hotel search unless they explicitly ask.",
+    `Preference mode: ${budgetMode || "balanced"}.`,
+    ...lines,
+  ].join("\n");
+
+  return { hotels: ranked, text };
+}
+
 // --- 4. TOOLS ---------------------------------------------------------------
 
 const tools = [
@@ -1822,7 +1973,7 @@ const tools = [
     function: {
       name: "create_plan",
       description:
-        "Finalize the trip. ONLY call this after you have searched for and found real flights, real hotels, and real activities, and you have dates + guests from tools.",
+        "Finalize the trip after searching flights, hotels, and activities. If live hotel availability fails but search_hotels returns Google Places fallback hotels, use those and continue instead of asking the user to fix provider availability.",
       parameters: {
         type: "object",
         properties: {
@@ -1859,7 +2010,7 @@ const tools = [
                     properties: {
                       type: {
                         type: "string",
-                        enum: ["activity", "food", "travel", "stay"],
+                        enum: ["activity", "food", "travel", "stay", "transfer", "flight"],
                       },
                       icon: { type: "string" },
                       time: {
@@ -2043,6 +2194,7 @@ Your goal:
 
 - Use **real hotels**:
   - Real property names, approximate nightly rates, and ratings. 
+  - If live hotel availability returns zero, use the verified Google Places fallback hotels from \`search_hotels\` with estimated prices. Do not loop on hotel availability or ask the user to pick workaround A/B/C unless they specifically ask.
   - Respect budget preference:
     - "saving/budget" -> prioritize lowest-priced available options.
     - "comfort" -> prioritize high-rated options (still with realistic prices).
@@ -2069,6 +2221,7 @@ When you call \`create_plan\`:
   - MUST have a \`provider\` field with a REAL entity name (hotel, restaurant, airline, tour operator).
   - MUST NOT be generic like "Nice restaurant", "Local hotel", "Beach time".
   - For travel events, mention airport names + codes and airline:
+  - Airport transfers are NOT flights. Use title "Private transfer to DXB" or "Hotel to airport transfer", icon "car", and provider "GetTransfer" or a local transfer operator. Never title a transfer "Flight segment".
     - Example details: "Turkish Airlines TK624, Nnamdi Azikiwe International Airport (ABV) → Sheremetyevo International Airport (SVO)".
 
 - Flights in \`flights\`:
@@ -2076,7 +2229,7 @@ When you call \`create_plan\`:
   - Derive from \`search_flights\` tool results.
 
 - Hotels:
-  - Use hotel names, prices, and ratings from \`search_hotels\` tool results for the selected date range.
+  - Use hotel names, prices, and ratings from \`search_hotels\` tool results for the selected date range. Google Places fallback hotels are acceptable when live availability fails.
 
 - Restaurants / Food:
   - Use restaurant names from \`__restaurants__\` results.
@@ -2107,6 +2260,7 @@ As soon as you have:
 - dates & guests (from tools)
 - at least one realistic flight option
 - at least one realistic hotel option
+- Google Places fallback hotels from \`search_hotels\` count as realistic hotel options when live availability fails.
 - a set of 4–8 good activities/places
 
 You MUST call \`create_plan\` IMMEDIATELY in that SAME assistant message.
@@ -2156,7 +2310,7 @@ Never say "I can't do X because I don't have browsing" — you DO have a search 
 
 function normalizeMessages(messages = []) {
   return messages
-    .filter((m) => !m.hidden)
+    .filter((m) => !m.hidden || m.role === "tool" || m.role === "system")
     .map((m) => {
       if (m.role === "tool") {
         return {
@@ -2217,6 +2371,7 @@ router.post("/travel", async (req, res) => {
     const mem = getMem(userId);
     const persistedMemory = await persistence.loadUserMemory(userId);
     mergePersistedMemory(mem, persistedMemory);
+    applySystemContextToMemory(messages, mem);
     updateProfileFromHistory(messages, mem);
 
     const persistMemory = () => {
@@ -2334,6 +2489,11 @@ router.post("/travel", async (req, res) => {
           try {
             const originCode = getCode(args.origin) || args.origin.toUpperCase();
             const destCode = getCode(args.destination) || args.destination.toUpperCase();
+            const adultCount = Math.max(1, Math.floor(Number(mem?.profile?.guest_counts?.adults) || 1));
+            const travelers = Array.from({ length: adultCount }, (_, idx) => ({
+              id: String(idx + 1),
+              travelerType: "ADULT",
+            }));
 
             // Build origin-destinations (round-trip if return_date provided)
             const originDestinations = [
@@ -2356,7 +2516,7 @@ router.post("/travel", async (req, res) => {
             const response = await amadeus.shopping.flightOffersSearch.post(JSON.stringify({
               currencyCode: 'USD',
               originDestinations,
-              travelers: [{ id: '1', travelerType: 'ADULT' }],
+              travelers,
               sources: ['GDS'],
               searchCriteria: {
                 maxFlightOffers: 20,
@@ -2387,7 +2547,7 @@ router.post("/travel", async (req, res) => {
                 const retPart = n.isRoundTrip ? " (round-trip)" : "";
                 return `${i + 1}. ${n.airline} ${n.flightNumber} ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart})${retPart} — $${n.price}`;
               }).join('\n');
-              result = `Found ${sorted.length} options. Top ${top.length} cheapest:\n${result}`;
+              result = `Found ${sorted.length} options. Top ${top.length} cheapest. Prices are total for ${adultCount} adult(s):\n${result}`;
             }
           } catch (e) {
             result = `Flight search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
@@ -2410,16 +2570,41 @@ router.post("/travel", async (req, res) => {
             const checkIn = sanitizeText(args.checkIn);
             const checkOut = sanitizeText(args.checkOut);
             const zenGuests = deriveZenGuestsForHotelSearch(args, mem?.profile);
+            const budgetMode = sanitizeText(mem?.profile?.budget?.prefer_comfort_or_saving || "balanced").toLowerCase();
+            const useFallback = async (reason) => {
+              const fallback = await buildHotelFallbackResult({
+                city: cityRaw,
+                checkIn,
+                checkOut,
+                guests: zenGuests,
+                budgetMode,
+                reason,
+                reqId,
+              });
+              if (fallback.hotels.length) {
+                mem.lastHotels = fallback.hotels;
+                mem.lastHotelSearch = {
+                  provider: "google_places_fallback",
+                  city: cityRaw,
+                  checkIn,
+                  checkOut,
+                  guests: zenGuests,
+                  budgetMode,
+                  reason,
+                  at: new Date().toISOString(),
+                };
+              }
+              return fallback.text;
+            };
             if (!cityRaw || !checkIn || !checkOut) {
               result = "Hotel search requires city, checkIn and checkOut.";
             } else if (!getRateHawkAuthHeaders()) {
-              result = "Hotel search is unavailable: RateHawk/Zen credentials are missing.";
+              result = await useFallback("RateHawk/Zen credentials are missing");
             } else {
-              const budgetMode = sanitizeText(mem?.profile?.budget?.prefer_comfort_or_saving || "balanced").toLowerCase();
               const region = await resolveZenRegionForCity(cityRaw, reqId);
               const regionId = region?.regionId ? String(region.regionId) : null;
               if (!regionId) {
-                result = `Could not resolve destination region for "${cityRaw}".`;
+                result = await useFallback(`could not resolve provider region for ${cityRaw}`);
               } else {
                 const serp = await fetchRateHawkSerpRegion({
                   regionId,
@@ -2437,7 +2622,7 @@ router.post("/travel", async (req, res) => {
                 const candidates = extractRateHawkSerpHotels(serp, hints);
 
                 if (candidates.length === 0) {
-                  result = `No available hotels were found for ${cityRaw} from ${checkIn} to ${checkOut}.`;
+                  result = await useFallback(`live availability returned zero properties for ${cityRaw}`);
                 } else {
                   let ranked = selectHotelsByBudgetMode(candidates, budgetMode, 8);
 
@@ -2542,6 +2727,14 @@ router.post("/travel", async (req, res) => {
         }
 
         if (toolName === "request_guests") {
+          if (profileHasGuests(mem?.profile)) {
+            newHistory.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(mem.profile.guest_counts),
+            });
+            return runConversation(newHistory, depth + 1);
+          }
           return {
             aiText: "Select how many people are traveling.",
             signal: { type: "guestsNeeded" },
@@ -2627,8 +2820,9 @@ router.post("/travel", async (req, res) => {
               if (f.departDate) {
                 const day = plan.itinerary.find(d => (d.date && d.date.startsWith(f.departDate)) || (d.day && d.day.startsWith(f.departDate)));
                 if (day && day.events) {
-                  const ev = day.events.find(e => e.type === 'travel' || (e.title && e.title.toLowerCase().includes('flight')));
+                  const ev = day.events.find(isFlightLikeEvent);
                   if (ev) {
+                    if (f.depart) ev.time = f.depart;
                     if (f.duration) ev.duration = f.duration;
                     if (f.flightNumber && (!ev.title || !ev.title.includes(f.flightNumber))) {
                       ev.title = `Flight ${f.flightNumber} (${f.airline})`;
@@ -2640,8 +2834,9 @@ router.post("/travel", async (req, res) => {
               if (f.returnDate) {
                 const day = plan.itinerary.find(d => (d.date && d.date.startsWith(f.returnDate)) || (d.day && d.day.startsWith(f.returnDate)));
                 if (day && day.events) {
-                  const ev = day.events.find(e => e.type === 'travel' || (e.title && e.title.toLowerCase().includes('flight')));
+                  const ev = day.events.find(isFlightLikeEvent);
                   if (ev) {
+                    if (f.returnDepart) ev.time = f.returnDepart;
                     if (f.returnDuration) ev.duration = f.returnDuration;
                     if (!ev.title || !ev.title.includes('Return')) ev.title = `Return Flight (${f.airline})`;
                   }
@@ -2668,6 +2863,21 @@ router.post("/travel", async (req, res) => {
               day.events.forEach((ev, idx) => {
                 if (!ev.time) ev.time = ["09:00", "13:00", "17:00", "20:00"][idx] || "10:00";
                 if (!ev.duration) ev.duration = "2h";
+                if (isTransferLikeEvent(ev)) {
+                  ev.type = "transfer";
+                  ev.icon = ev.icon && ev.icon !== "flight" ? ev.icon : "transfer";
+                  if (/flight\s*(?:segment|return segment)/i.test(String(ev.title || ""))) {
+                    ev.title = /airport|DXB|AUH|SVO|hotel/i.test(String(ev.details || ""))
+                      ? "Private transfer to airport"
+                      : "Private transfer";
+                  }
+                  if (!ev.provider || /airline|airways|local/i.test(String(ev.provider))) {
+                    ev.provider = "GetTransfer";
+                  }
+                } else if (isFlightLikeEvent(ev)) {
+                  ev.type = "flight";
+                  ev.icon = "flight";
+                }
                 if (ev.type === "activity") {
                   const matchedActivity = pickActivityFromMemory(
                     [ev.title, ev.details, ev.provider].filter(Boolean).join(" "),
@@ -2756,15 +2966,24 @@ router.post("/travel", async (req, res) => {
                 }
               }
 
-              item.booking_url = await createAffiliateLink({
-                hotelName: matchedHotel?.name || item.provider || item.item,
-                city: matchedHotel?.city || hotelContext.city || plan.location,
-                checkIn: hotelCheckIn,
-                checkOut: hotelCheckOut,
-                guests: zenGuestsForPlan,
-                hotelId: matchedHotel?.hotelId || null,
-                reqId,
-              });
+              if (matchedHotel?.source === "google_places_fallback" && (matchedHotel.booking_url || matchedHotel.googleMapsUrl)) {
+                item.booking_url = matchedHotel.booking_url || matchedHotel.googleMapsUrl;
+                item.sourceConfidence = {
+                  category: "hotel",
+                  confidence: "medium",
+                  source: "google_places_fallback",
+                };
+              } else {
+                item.booking_url = await createAffiliateLink({
+                  hotelName: matchedHotel?.name || item.provider || item.item,
+                  city: matchedHotel?.city || hotelContext.city || plan.location,
+                  checkIn: hotelCheckIn,
+                  checkOut: hotelCheckOut,
+                  guests: zenGuestsForPlan,
+                  hotelId: matchedHotel?.hotelId || null,
+                  reqId,
+                });
+              }
             } else {
               if (
                 matchedActivity &&
@@ -2905,6 +3124,12 @@ router.post("/travel", async (req, res) => {
       }
 
       if (mentionsGuests) {
+        if (profileHasGuests(mem?.profile)) {
+          const { adults, children = 0 } = mem.profile.guest_counts;
+          return {
+            aiText: `I've got it: ${adults} adult(s), ${children} child(ren). I'll use that and continue.`,
+          };
+        }
         logInfo(
           reqId,
           "[Guardrail] Intercepted text question about guests. Returning guestsNeeded signal instead."

@@ -39,6 +39,25 @@ const normalizeText = (value = "") =>
     .replace(/\s+/g, " ")
     .trim();
 
+const eventText = (event = {}) =>
+  normalizeText([event.type, event.icon, event.title, event.details, event.provider].filter(Boolean).join(" "));
+
+const isTransferEvent = (event = {}) =>
+  /\btransfer\b|\btaxi\b|\bchauffeur\b|\bdriver\b|\bshuttle\b|\bferry\b|\bboat\b|\bhotel to airport\b|\bto airport\b|\bfrom airport\b/.test(eventText(event));
+
+const isFlightEvent = (event = {}) => {
+  const text = eventText(event);
+  if (isTransferEvent(event)) return false;
+  return event.type === "flight" ||
+    event.icon === "flight" ||
+    /\bflight\b|\bairways?\b|\bairlines?\b/.test(text);
+};
+
+const isGroundRouteEvent = (event = {}) =>
+  hasCoordinates(event) &&
+  !isFlightEvent(event) &&
+  event.coordinateConfidence !== "city_level";
+
 const toNumber = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -306,6 +325,7 @@ const confidenceForBookingItem = (item = {}) => {
   if (
     provider.includes("zenhotels") ||
     provider.includes("ratehawk") ||
+    url.includes("google.com/maps") ||
     label.includes("hotel") ||
     label.includes("stay") ||
     label.includes("accommodation")
@@ -313,7 +333,7 @@ const confidenceForBookingItem = (item = {}) => {
     return {
       category: "hotel",
       confidence: url ? "high" : "medium",
-      source: url ? "ratehawk_zen" : "planner",
+      source: url.includes("google.com/maps") ? "google_places_fallback" : url ? "ratehawk_zen" : "planner",
     };
   }
 
@@ -425,7 +445,7 @@ async function enrichEventCoordinates(event, { plan, mapsProvider, memoryPlaces,
     applyProviderPlace(event, place);
   }
 
-  if (!event.placeId && mapsProvider?.hasPlaces && event.type !== "travel") {
+  if (!event.placeId && mapsProvider?.hasPlaces && !isFlightEvent(event)) {
     const query = buildGeocodeQuery(event, plan);
     const place = await mapsProvider.findPlace(query);
     applyProviderPlace(event, place);
@@ -442,7 +462,7 @@ async function enrichEventCoordinates(event, { plan, mapsProvider, memoryPlaces,
     }
   }
 
-  if (!hasCoordinates(event) && cityCenter && event.type !== "travel") {
+  if (!hasCoordinates(event) && cityCenter && !isFlightEvent(event)) {
     setCoordinates(event, cityCenter, cityCenter.provider);
     event.coordinateConfidence = "city_level";
   } else if (hasCoordinates(event) && !event.coordinateConfidence) {
@@ -451,7 +471,7 @@ async function enrichEventCoordinates(event, { plan, mapsProvider, memoryPlaces,
 }
 
 async function buildRouteLegs(day, mapsProvider) {
-  const events = (day.events || []).filter(hasCoordinates);
+  const events = (day.events || []).filter(isGroundRouteEvent);
   const legs = [];
   for (let i = 1; i < events.length; i += 1) {
     const from = events[i - 1];

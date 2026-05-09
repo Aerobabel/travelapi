@@ -228,6 +228,30 @@ async function googleTextSearchPlace({ query, key, timeoutMs }) {
   return normalizeGooglePlace(first, key);
 }
 
+async function googleTextSearchPlaces({ query, key, timeoutMs, limit = 8, type = "" }) {
+  const url = new URL("https://maps.googleapis.com/maps/api/place/textsearch/json");
+  url.searchParams.set("query", query);
+  if (type) url.searchParams.set("type", type);
+  url.searchParams.set("key", key);
+
+  const payload = await fetchJsonWithTimeout(url.toString(), { timeoutMs });
+  if (payload?.status && !["OK", "ZERO_RESULTS"].includes(payload.status)) {
+    throw new Error(`Google text search ${payload.status}: ${payload.error_message || ""}`.trim());
+  }
+
+  const rows = Array.isArray(payload?.results) ? payload.results.slice(0, limit) : [];
+  const normalized = await Promise.all(
+    rows.map(async (row) => {
+      if (row.place_id) {
+        const detailed = await googlePlaceDetails({ placeId: row.place_id, key, timeoutMs });
+        if (detailed) return detailed;
+      }
+      return normalizeGooglePlace(row, key);
+    })
+  );
+  return normalized.filter(Boolean);
+}
+
 const googleMode = (mode) => {
   const normalized = normalizeMode(mode);
   if (normalized === "walking") return "walking";
@@ -417,6 +441,20 @@ export function createMapsProvider({
       );
       if (place) setPlaceCache(cacheKey, place);
       return place;
+    },
+
+    async findPlaces(query, { limit = 8, type = "" } = {}) {
+      const q = String(query || "").trim();
+      if (!q || !googleKey) return [];
+      const cacheKey = `google-list:${q.toLowerCase()}:${type}:${limit}`;
+      if (placeCache.has(cacheKey)) return placeCache.get(cacheKey);
+
+      const places = await safeCall(
+        () => googleTextSearchPlaces({ query: q, key: googleKey, timeoutMs, limit, type }),
+        []
+      );
+      setPlaceCache(cacheKey, places);
+      return places;
     },
 
     async placeDetails(placeId) {
