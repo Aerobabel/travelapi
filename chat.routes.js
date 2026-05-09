@@ -3,6 +3,8 @@ import Amadeus from "amadeus";
 import dotenv from "dotenv";
 import { Router } from "express";
 import OpenAI from "openai";
+import { createMapsProvider } from "./maps.provider.js";
+import { enrichPlanV2 } from "./plan-v2.js";
 
 dotenv.config();
 
@@ -26,6 +28,7 @@ try {
 const router = Router();
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const mapsProvider = createMapsProvider({ logger: console });
 
 // Amadeus client
 const amadeus = new Amadeus({
@@ -1723,8 +1726,17 @@ const tools = [
                           "REAL NAME of place/airline/hotel/tour operator. Never generic.",
                       },
                       approxPrice: { type: "number" },
+                      durationMinutes: { type: "number" },
                       latitude: { type: "number" },
                       longitude: { type: "number" },
+                      address: { type: "string" },
+                      placeId: { type: "string" },
+                      rating: { type: "number" },
+                      neighborhood: { type: "string" },
+                      openingHours: {
+                        type: "array",
+                        items: { type: "string" },
+                      },
                       booking_url: {
                         type: "string",
                         description: "Direct booking page for the exact event when available. Avoid generic provider homepages.",
@@ -1892,6 +1904,7 @@ Your goal:
   - **CRITICAL:** Search for "hidden gems", "local favorites", "best kept secrets", and "unique experiences".
   - **DIVERSITY:** Ensure the plan has a mix of culture, culinary, relaxation, and active elements.
   - **LOGISTICS:** Group activities by neighborhood to minimize travel time. Don't zigzag across the city.
+  - Use exact place names, addresses, and coordinates whenever search results provide them. The backend will enrich the final plan with map bounds, route legs, and route quality checks.
 
 =====================================
 ITINERARY & create_plan
@@ -2019,6 +2032,25 @@ function normalizeMessages(messages = []) {
 }
 
 // --- 7. MAIN ROUTE ----------------------------------------------------------
+
+router.get("/travel/capabilities", (_req, res) => {
+  res.json({
+    ok: true,
+    model: "gpt-5.2",
+    maps: {
+      provider: mapsProvider.provider,
+      geocoding: mapsProvider.hasGeocoding,
+      routing: mapsProvider.hasRouting,
+    },
+    plan: {
+      schemaVersion: "plan.v2",
+      routeLegs: true,
+      mapBounds: true,
+      qualityScore: true,
+      heuristicFallback: true,
+    },
+  });
+});
 
 router.post("/travel", async (req, res) => {
   const reqId = newReqId();
@@ -2453,6 +2485,10 @@ router.post("/travel", async (req, res) => {
 
           // Format itinerary dates
           plan.itinerary.forEach((day) => {
+            const rawDayDate = sanitizeText(day.isoDate || day.date || day.day);
+            if (/^\d{4}-\d{2}-\d{2}/.test(rawDayDate)) {
+              day.isoDate = rawDayDate.slice(0, 10);
+            }
             if (day.date) { const nice = formatDateToMMMDD(day.date); day.date = nice; day.day = nice; }
             else if (day.day) { const nice = formatDateToMMMDD(day.day); day.date = nice; day.day = nice; }
             if (Array.isArray(day.events)) {
@@ -2614,6 +2650,18 @@ router.post("/travel", async (req, res) => {
           if (plan.costBreakdown.length > 0) {
             plan.price = plan.costBreakdown.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
           }
+
+          await enrichPlanV2(plan, {
+            mapsProvider,
+            memories: {
+              activities: mem?.lastActivities || [],
+              restaurants: mem?.lastRestaurants || [],
+              hotels: mem?.lastHotels || [],
+            },
+            logger: {
+              warn: (...args) => logError(reqId, ...args),
+            },
+          });
 
           return {
             aiText: `I've built a plan for ${plan.location}.`,
