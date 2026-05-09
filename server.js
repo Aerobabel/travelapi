@@ -12,6 +12,7 @@ import chatRoutes from "./chat.routes.js";
 import cruisesRouter from "./cruises.routes.js";
 import flightsRouter from "./flights.routes.js";
 import bookingsRouter from "./bookings.routes.js";
+import activitiesRouter from "./activities.routes.js";
 
 const app = express();
 
@@ -39,6 +40,7 @@ app.use(cruisesRouter);
 app.use(chatRoutes);
 app.use(flightsRouter);
 app.use(bookingsRouter);
+app.use(activitiesRouter);
 
 // Health check
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));

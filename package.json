@@ -5,7 +5,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "check": "node --check server.js && node --check chat.routes.js && node --check flights.routes.js && node --check hotels.routes.js && node --check transfers.routes.js && node --check cruises.routes.js && node --check bookings.routes.js && node --check maps.provider.js && node --check plan-v2.js && node --check travel-intelligence.js && node --check persistence.js && node --check scripts/evaluate-plan-v2.js && node --check scripts/evaluate-contracts.js",
+    "check": "node --check server.js && node --check chat.routes.js && node --check flights.routes.js && node --check hotels.routes.js && node --check transfers.routes.js && node --check cruises.routes.js && node --check bookings.routes.js && node --check activities.routes.js && node --check maps.provider.js && node --check plan-v2.js && node --check travel-intelligence.js && node --check persistence.js && node --check scripts/evaluate-plan-v2.js && node --check scripts/evaluate-contracts.js",
     "eval:plan-v2": "node scripts/evaluate-plan-v2.js",
     "eval:contracts": "node scripts/evaluate-contracts.js"
   },
