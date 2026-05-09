@@ -298,6 +298,7 @@ async function buildAmadeusTransferRequest({
     endGeoCode: destination.geoCode,
     transferType: "PRIVATE",
     startDateTime: `${startDate}T${startTime}:00`,
+    providerCodes: process.env.AMADEUS_TRANSFER_PROVIDER_CODES || "TXO",
     passengers: totalPassengers(passengers),
     passengerCharacteristics: passengerCharacteristics(passengers),
   };
