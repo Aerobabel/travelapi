@@ -5,6 +5,12 @@ import { Router } from "express";
 import OpenAI from "openai";
 import { createMapsProvider } from "./maps.provider.js";
 import { enrichPlanV2 } from "./plan-v2.js";
+import {
+  buildMemorySnapshot,
+  createPersistence,
+  mergePersistedMemory,
+} from "./persistence.js";
+import { enrichTravelIntelligence } from "./travel-intelligence.js";
 
 dotenv.config();
 
@@ -29,6 +35,7 @@ const router = Router();
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 const mapsProvider = createMapsProvider({ logger: console });
+const persistence = createPersistence({ logger: console });
 
 // Amadeus client
 const amadeus = new Amadeus({
@@ -2049,7 +2056,12 @@ router.get("/travel/capabilities", (_req, res) => {
       mapBounds: true,
       qualityScore: true,
       placeEnrichment: true,
+      travelIntelligence: true,
       heuristicFallback: true,
+    },
+    persistence: {
+      enabled: persistence.enabled,
+      provider: persistence.enabled ? "supabase-rest" : "disabled",
     },
   });
 });
@@ -2060,7 +2072,20 @@ router.post("/travel", async (req, res) => {
   try {
     const { messages = [], userId = "anonymous" } = req.body || {};
     const mem = getMem(userId);
+    const persistedMemory = await persistence.loadUserMemory(userId);
+    mergePersistedMemory(mem, persistedMemory);
     updateProfileFromHistory(messages, mem);
+
+    const persistMemory = () => {
+      if (!persistence.enabled) return;
+      persistence
+        .saveUserMemory(userId, {
+          profile: mem.profile,
+          memory: buildMemorySnapshot(mem),
+        })
+        .catch((error) => logError(reqId, "Memory persistence failed", error?.message || error));
+    };
+    persistMemory();
 
     if (!hasKey || !client) {
       return res.json({ aiText: "API Key missing. Cannot plan trip." });
@@ -2151,6 +2176,7 @@ router.post("/travel", async (req, res) => {
               mem.lastRestaurants = [];
             }
           }
+          persistMemory();
           newHistory.push({
             role: "tool",
             tool_call_id: toolCall.id,
@@ -2224,6 +2250,7 @@ router.post("/travel", async (req, res) => {
             result = `Flight search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
             logError(reqId, "Amadeus Flight Error", e);
           }
+          persistMemory();
           newHistory.push({
             role: "tool",
             tool_call_id: toolCall.id,
@@ -2352,6 +2379,7 @@ router.post("/travel", async (req, res) => {
             result = `Hotel search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
             logError(reqId, "RateHawk Hotel Error", e);
           }
+          persistMemory();
           newHistory.push({
             role: "tool",
             tool_call_id: toolCall.id,
@@ -2664,6 +2692,17 @@ router.post("/travel", async (req, res) => {
               warn: (...args) => logError(reqId, ...args),
             },
           });
+
+          await enrichTravelIntelligence(plan, {
+            profile: mem.profile,
+          });
+
+          persistMemory();
+          if (persistence.enabled) {
+            persistence
+              .savePlan(userId, plan)
+              .catch((error) => logError(reqId, "Plan persistence failed", error?.message || error));
+          }
 
           return {
             aiText: `I've built a plan for ${plan.location}.`,

@@ -105,6 +105,11 @@ function durationFor({ distanceKm, scMeta }) {
   const mins = Math.ceil((distanceKm / speedKmh) * 60);
   return Math.max(18, Math.min(mins, 90));
 }
+const modeledConfidence = (source, note) => ({
+  source,
+  confidence: "medium",
+  note,
+});
 
 /* ------------------------------- helpers: fetch ------------------------------ */
 const fetchAirlines = async () => AIRLINES;
@@ -156,7 +161,15 @@ router.get(alias("/transfers/flights"), async (req, res, next) => {
       origin,
       airlines: airlines ? airlines.split(",").map(s => s.trim()) : [],
     });
-    res.json({ flights });
+    res.json({
+      flights: flights.map((flight) => ({
+        ...flight,
+        sourceConfidence: modeledConfidence(
+          "mock_flight_reference",
+          "Transfer flight references are a small static helper list."
+        ),
+      })),
+    });
   } catch (e) { next(e); }
 });
 
@@ -213,6 +226,10 @@ router.post(alias("/transfers/search"), async (req, res, next) => {
         freeWaitEnds: addMinutes(pickupTime, 60),
         dropAt: addMinutes(pickupTime, durationMin),
         to,
+        sourceConfidence: modeledConfidence(
+          "estimated_transfer_pricing",
+          "Transfer price and duration are modeled until a live transfer supplier is connected."
+        ),
       };
     });
 
@@ -227,6 +244,10 @@ router.post(alias("/transfers/search"), async (req, res, next) => {
       distanceKm,
       serviceClass,
       passengers,
+      sourceConfidence: modeledConfidence(
+        "estimated_transfer_pricing",
+        "Offers are generated from local vendor profiles and distance estimates."
+      ),
     };
 
     res.json({ summary, offers: sorted });
@@ -241,7 +262,19 @@ router.post(alias("/transfers/quote"), async (req, res, next) => {
     const distanceKm = typeof distanceOverride === "number" ? distanceOverride : estimateDistanceKm(from, to);
     const price = priceFor({ passengers, distanceKm, features: { guaranteed: true }, scMeta });
     const durationMin = durationFor({ distanceKm, scMeta });
-    res.json({ from, to, serviceClass: scMeta?.name || "Premium", distanceKm, durationMin, price, currency: "USD" });
+    res.json({
+      from,
+      to,
+      serviceClass: scMeta?.name || "Premium",
+      distanceKm,
+      durationMin,
+      price,
+      currency: "USD",
+      sourceConfidence: modeledConfidence(
+        "estimated_transfer_pricing",
+        "Quote is an estimate until a live transfer supplier is connected."
+      ),
+    });
   } catch (e) { next(e); }
 });
 

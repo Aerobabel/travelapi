@@ -1,0 +1,103 @@
+[
+  {
+    "id": "family-tokyo-balanced",
+    "prompt": "Plan a balanced 5 day family trip to Tokyo from New York in October with two adults and two kids.",
+    "mustHave": ["origin", "destination", "dates", "guests", "flights", "hotels", "activities", "routeLegs"]
+  },
+  {
+    "id": "one-way-budget-dubai",
+    "prompt": "Find me a cheap one-way trip from London to Dubai next month, solo traveler, budget focused.",
+    "mustHave": ["oneWayFlight", "hotels", "costBreakdown", "bookingLinks"]
+  },
+  {
+    "id": "romantic-paris-weekend",
+    "prompt": "Build a romantic weekend in Paris from Istanbul with comfortable hotels and great food.",
+    "mustHave": ["restaurants", "hotel", "places", "mapBounds"]
+  },
+  {
+    "id": "multi-city-italy",
+    "prompt": "Plan Rome, Florence, and Venice in one trip, culture heavy, no nightlife.",
+    "mustHave": ["multiCity", "citySequence", "routeOptimization", "activities"]
+  },
+  {
+    "id": "photo-inspired-greece",
+    "prompt": "Use this beach island photo as inspiration and plan something similar for a couple.",
+    "mustHave": ["imageIntent", "destinationInference", "datesTool", "guestsTool"]
+  },
+  {
+    "id": "accessibility-london",
+    "prompt": "Plan London with step-free routes and low walking distance for my parents.",
+    "mustHave": ["accessibility", "routeLegs", "transferNotes", "hotelArea"]
+  },
+  {
+    "id": "rainy-day-singapore",
+    "prompt": "Singapore in rainy season, give me indoor alternatives and food markets.",
+    "mustHave": ["weather", "alternatives", "food", "places"]
+  },
+  {
+    "id": "nightlife-berlin",
+    "prompt": "Berlin nightlife trip for friends, but keep hotels safe and transport easy.",
+    "mustHave": ["lateNightSafety", "neighborhoods", "routeLegs"]
+  },
+  {
+    "id": "visa-reminder-france",
+    "prompt": "I have a Nigerian passport and want a Paris trip from Abuja.",
+    "mustHave": ["visa", "origin", "specificAirports", "insurance"]
+  },
+  {
+    "id": "ski-switzerland",
+    "prompt": "Plan a ski trip to Switzerland with a premium hotel and transfers.",
+    "mustHave": ["weather", "transfers", "hotel", "activities"]
+  },
+  {
+    "id": "remote-work-lisbon",
+    "prompt": "Lisbon for two weeks while working remotely, good Wi-Fi and quiet neighborhoods.",
+    "mustHave": ["neighborhoods", "longStay", "workspace", "budget"]
+  },
+  {
+    "id": "food-rome",
+    "prompt": "Rome food-first itinerary with real restaurants and walking routes.",
+    "mustHave": ["restaurants", "routeLegs", "places", "openingHours"]
+  },
+  {
+    "id": "museum-madrid",
+    "prompt": "Madrid museums and tapas, avoid backtracking and group by neighborhood.",
+    "mustHave": ["routeOptimization", "neighborhoods", "places"]
+  },
+  {
+    "id": "stopover-istanbul",
+    "prompt": "I have a 20 hour stopover in Istanbul, build a safe route from the airport.",
+    "mustHave": ["shortTrip", "transfers", "routeLegs", "safety"]
+  },
+  {
+    "id": "honeymoon-maldives",
+    "prompt": "Luxury honeymoon in the Maldives, overwater villa, minimal transfers.",
+    "mustHave": ["luxuryHotel", "transfers", "weather", "costBreakdown"]
+  },
+  {
+    "id": "solo-kyoto",
+    "prompt": "Solo Kyoto trip, calm temples, tea, photography, not too expensive.",
+    "mustHave": ["activities", "budget", "places", "routeLegs"]
+  },
+  {
+    "id": "business-nyc",
+    "prompt": "New York business trip near Midtown with two free evenings.",
+    "mustHave": ["hotelArea", "timeWindows", "restaurants", "routeLegs"]
+  },
+  {
+    "id": "family-orlando",
+    "prompt": "Orlando family theme park trip, plan hotel, park days, and transfers.",
+    "mustHave": ["family", "tickets", "transfers", "costBreakdown"]
+  },
+  {
+    "id": "budget-prague",
+    "prompt": "Very low budget Prague trip from Berlin, train preferred if possible.",
+    "mustHave": ["budget", "transportAlternatives", "hotels", "activities"]
+  },
+  {
+    "id": "last-minute-amsterdam",
+    "prompt": "Last minute Amsterdam weekend from Manchester, cheapest reasonable option.",
+    "mustHave": ["flights", "hotels", "dates", "priceRanking"]
+  }
+]
+

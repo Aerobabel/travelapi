@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createMapsProvider } from "../maps.provider.js";
 import { enrichPlanV2 } from "../plan-v2.js";
+import { enrichTravelIntelligence } from "../travel-intelligence.js";
 
 const mapsProvider = createMapsProvider({ env: {} });
 
@@ -81,6 +82,7 @@ assert.equal(samplePlan.itinerary[0].routeLegs.length, 2);
 assert.ok(samplePlan.mapBounds);
 assert.ok(samplePlan.planQuality.score >= 75);
 assert.equal(samplePlan.exactPlaceCount, 3);
+assert.equal(samplePlan.providerConfidence.directBookingLinks, 1);
 
 assert.equal(fallbackPlan.schemaVersion, "plan.v2");
 assert.equal(fallbackPlan.placeCount, 1);
@@ -145,5 +147,30 @@ assert.equal(enrichedEvent.address, "1 Test Street, Test City");
 assert.equal(enrichedEvent.neighborhood, "Central");
 assert.equal(enrichedEvent.coordinateSource, "google_places");
 assert.equal(placesPlan.exactPlaceCount, 1);
+
+const mockWeatherFetch = async () => ({
+  ok: true,
+  async json() {
+    return {
+      daily: {
+        time: ["2026-06-01"],
+        temperature_2m_max: [22],
+        temperature_2m_min: [16],
+        weather_code: [1],
+        precipitation_probability_max: [15],
+      },
+    };
+  },
+});
+
+await enrichTravelIntelligence(samplePlan, {
+  profile: { nationality: "United States" },
+  fetchImpl: mockWeatherFetch,
+});
+
+assert.equal(samplePlan.weather.provider, "open-meteo");
+assert.equal(samplePlan.travelIntel.visa.status, "check_required");
+assert.ok(samplePlan.travelIntel.safety.summary.includes("Paris"));
+assert.ok(samplePlan.travelIntel.dataSources.includes("Open-Meteo weather"));
 
 console.log("Plan v2 evaluation passed");

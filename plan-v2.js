@@ -290,6 +290,98 @@ const buildRouteSummary = (legs = []) => {
   return `${formatDistance(distance)} between stops, about ${formatDuration(duration)} total by ${modes.join(" + ") || "route"}`;
 };
 
+const confidenceForBookingItem = (item = {}) => {
+  const provider = normalizeText(item.provider);
+  const label = normalizeText([item.item, item.details].filter(Boolean).join(" "));
+  const url = clean(item.booking_url);
+
+  if (item.raw || label.includes("flight") || label.includes("fly tickets")) {
+    return {
+      category: "flight",
+      confidence: item.raw ? "high" : "medium",
+      source: item.raw ? "amadeus" : "planner",
+    };
+  }
+
+  if (
+    provider.includes("zenhotels") ||
+    provider.includes("ratehawk") ||
+    label.includes("hotel") ||
+    label.includes("stay") ||
+    label.includes("accommodation")
+  ) {
+    return {
+      category: "hotel",
+      confidence: url ? "high" : "medium",
+      source: url ? "ratehawk_zen" : "planner",
+    };
+  }
+
+  if (
+    provider.includes("gettransfer") ||
+    label.includes("transfer") ||
+    label.includes("taxi")
+  ) {
+    return {
+      category: "transfer",
+      confidence: url ? "medium" : "low",
+      source: "estimated_provider",
+    };
+  }
+
+  if (
+    provider.includes("getyourguide") ||
+    provider.includes("viator") ||
+    provider.includes("headout") ||
+    provider.includes("tiqets") ||
+    provider.includes("klook") ||
+    label.includes("tour") ||
+    label.includes("ticket") ||
+    label.includes("excursion")
+  ) {
+    return {
+      category: "activity",
+      confidence: url ? "high" : "medium",
+      source: url ? "serpapi_places" : "planner",
+    };
+  }
+
+  if (provider.includes("axa") || provider.includes("allianz") || label.includes("insurance")) {
+    return {
+      category: "insurance",
+      confidence: "medium",
+      source: "estimated_provider",
+    };
+  }
+
+  return {
+    category: "other",
+    confidence: url ? "medium" : "low",
+    source: url ? "provider_link" : "planner",
+  };
+};
+
+const annotateCostConfidence = (plan = {}) => {
+  const items = Array.isArray(plan.costBreakdown) ? plan.costBreakdown : [];
+  for (const item of items) {
+    item.sourceConfidence = confidenceForBookingItem(item);
+  }
+
+  const counts = items.reduce((acc, item) => {
+    const confidence = item.sourceConfidence?.confidence || "unknown";
+    acc[confidence] = (acc[confidence] || 0) + 1;
+    return acc;
+  }, {});
+
+  plan.providerConfidence = {
+    costItems: counts,
+    realTimeFlights: items.some((item) => item.sourceConfidence?.source === "amadeus"),
+    realTimeHotels: items.some((item) => item.sourceConfidence?.source === "ratehawk_zen"),
+    directBookingLinks: items.filter((item) => item.booking_url).length,
+    totalCostItems: items.length,
+  };
+};
+
 const nearestNeighborOrder = (events = []) => {
   const withCoords = events.filter(hasCoordinates);
   if (withCoords.length <= 2) return events.map((event) => event.id);
@@ -498,6 +590,10 @@ export async function enrichPlanV2(plan, { mapsProvider, memories = {}, logger =
       currentDistanceMeters: currentMeters,
       recommendedDistanceMeters: optimizedMeters,
       potentialSavingMeters: Math.max(0, currentMeters - optimizedMeters),
+      worthwhile:
+        currentOrder.length >= 3 &&
+        optimizedMeters > 0 &&
+        currentMeters - optimizedMeters >= 1500,
     };
   }
 
@@ -508,6 +604,7 @@ export async function enrichPlanV2(plan, { mapsProvider, memories = {}, logger =
   plan.exactPlaceCount = allEvents.filter(
     (event) => hasCoordinates(event) && event.coordinateConfidence !== "city_level"
   ).length;
+  annotateCostConfidence(plan);
   plan.planQuality = scorePlanQuality(plan);
 
   return plan;

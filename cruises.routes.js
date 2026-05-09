@@ -167,6 +167,11 @@ const normalizeCruise = (r) => {
     days: `${Number(r.nights || 0)} days · 1 guest`,
     daysTxt: `${Number(r.nights || 0)} nights · 2 guests`,
     tags: tagsFromPerks(r.perks || {}),
+    sourceConfidence: {
+      source: "mock_catalog",
+      confidence: "low",
+      note: "Cruise data is modeled sample inventory, not live supplier availability.",
+    },
   };
 };
 
@@ -238,7 +243,14 @@ router.get("/cruises/lines", (_req, res) => {
 // recommended (top by rating)
 router.get("/cruises/recommended", (_req, res) => {
   const list = [...CRUISES].sort((a, b) => b.rating - a.rating).slice(0, 6).map(normalizeCruise);
-  res.json({ cruises: list });
+  res.json({
+    cruises: list,
+    sourceConfidence: {
+      source: "mock_catalog",
+      confidence: "low",
+      note: "Use for UX only until a live cruise supplier is connected.",
+    },
+  });
 });
 
 /**
@@ -278,7 +290,17 @@ router.post("/cruises/search", (req, res) => {
     filters,
   };
 
-  res.json({ summary, cruises: offers });
+  res.json({
+    summary: {
+      ...summary,
+      sourceConfidence: {
+        source: "mock_catalog",
+        confidence: "low",
+        note: "Filtered from modeled cruise inventory.",
+      },
+    },
+    cruises: offers,
+  });
 });
 
 // Optional: pretend booking endpoint (stores in memory)
@@ -289,7 +311,18 @@ router.post("/cruises/book", (req, res) => {
     return res.status(400).json({ error: "Missing cruiseId or contact.name/email" });
   }
   const id = uid();
-  const rec = { id, status: "confirmed", created_at: new Date().toISOString(), cruiseId, contact };
+  const rec = {
+    id,
+    status: "request_received",
+    created_at: new Date().toISOString(),
+    cruiseId,
+    contact,
+    sourceConfidence: {
+      source: "mock_booking",
+      confidence: "low",
+      note: "This is not a live supplier confirmation.",
+    },
+  };
   BOOKINGS.unshift(rec);
   res.json({ booking: rec });
 });

@@ -59,6 +59,11 @@ router.post("/bookings", async (req, res) => {
             paymentIntentId: paymentIntent.id,
             status: "pending_payment",
             createdAt: new Date(),
+            sourceConfidence: {
+                payment: "stripe_live_or_test_key",
+                persistence: "memory_only",
+                note: "PaymentIntent is real Stripe, but booking storage is in-memory until database persistence is added.",
+            },
             details: {
                 type,
                 itemId,
