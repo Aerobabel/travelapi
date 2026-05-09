@@ -196,6 +196,41 @@ const applyMemoryPlace = (event, match) => {
   };
 };
 
+const applyProviderPlace = (event, place) => {
+  if (!place) return;
+  if (place.name) {
+    event.placeName = place.name;
+    if (!event.provider || /^(local|provider|tour operator|restaurant)$/i.test(clean(event.provider))) {
+      event.provider = place.name;
+    }
+  }
+  if (place.placeId) event.placeId = place.placeId;
+  if (place.address) event.address = place.address;
+  if (place.rating !== null && place.rating !== undefined) event.rating = place.rating;
+  if (place.userRatingsTotal !== null && place.userRatingsTotal !== undefined) {
+    event.userRatingsTotal = place.userRatingsTotal;
+  }
+  if (place.priceLevel !== null && place.priceLevel !== undefined) event.priceLevel = place.priceLevel;
+  if (place.businessStatus) event.businessStatus = place.businessStatus;
+  if (Array.isArray(place.types) && place.types.length) event.placeTypes = place.types;
+  if (Array.isArray(place.openingHours) && place.openingHours.length) {
+    event.openingHours = place.openingHours;
+  }
+  if (place.openNow !== null && place.openNow !== undefined) event.openNow = place.openNow;
+  if (place.website && !event.website) event.website = place.website;
+  if (place.googleMapsUrl) event.googleMapsUrl = place.googleMapsUrl;
+  if (place.photoUrl) event.photoUrl = place.photoUrl;
+  if (place.editorialSummary && !event.details) event.details = place.editorialSummary;
+  if (place.neighborhood) event.neighborhood = place.neighborhood;
+  if (!hasCoordinates(event) && place.latitude !== null && place.longitude !== null) {
+    setCoordinates(event, place, place.provider || "places");
+  }
+  event.placeEnrichment = {
+    provider: place.provider || "places",
+    confidence: place.confidence || "provider",
+  };
+};
+
 const cityFallback = (plan) => {
   const names = [
     ...(Array.isArray(plan?.cities) ? plan.cities : []),
@@ -292,6 +327,17 @@ const routeDistanceForOrder = (eventsById, orderedIds = []) => {
 async function enrichEventCoordinates(event, { plan, mapsProvider, memoryPlaces, cityCenter }) {
   const match = findMemoryMatch(event, memoryPlaces);
   applyMemoryPlace(event, match);
+
+  if (event.placeId && mapsProvider?.hasPlaces) {
+    const place = await mapsProvider.placeDetails(event.placeId);
+    applyProviderPlace(event, place);
+  }
+
+  if (!event.placeId && mapsProvider?.hasPlaces && event.type !== "travel") {
+    const query = buildGeocodeQuery(event, plan);
+    const place = await mapsProvider.findPlace(query);
+    applyProviderPlace(event, place);
+  }
 
   if (!hasCoordinates(event) && mapsProvider?.hasGeocoding) {
     const query = buildGeocodeQuery(event, plan);

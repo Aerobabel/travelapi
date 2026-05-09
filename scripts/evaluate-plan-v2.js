@@ -87,5 +87,63 @@ assert.equal(fallbackPlan.placeCount, 1);
 assert.equal(fallbackPlan.exactPlaceCount, 0);
 assert.ok(fallbackPlan.planQuality.warnings.some((w) => w.includes("exact place-level coordinates")));
 
-console.log("Plan v2 evaluation passed");
+const mockPlacesProvider = {
+  provider: "mock_google",
+  hasGeocoding: false,
+  hasRouting: false,
+  hasPlaces: true,
+  async findPlace(query) {
+    if (!query.includes("Imaginary Museum")) return null;
+    return {
+      provider: "google_places",
+      placeId: "mock-place-1",
+      name: "Imaginary Museum",
+      address: "1 Test Street, Test City",
+      latitude: 10,
+      longitude: 20,
+      rating: 4.8,
+      userRatingsTotal: 1200,
+      priceLevel: 2,
+      openingHours: ["Monday: 9:00 AM - 6:00 PM"],
+      googleMapsUrl: "https://www.google.com/maps/place/?q=place_id:mock-place-1",
+      photoUrl: "https://example.com/photo.jpg",
+      neighborhood: "Central",
+      confidence: "provider",
+    };
+  },
+  async routeLeg() {
+    return null;
+  },
+};
 
+const placesPlan = {
+  location: "Test City",
+  itinerary: [
+    {
+      date: "2026-08-01",
+      day: "2026-08-01",
+      events: [
+        {
+          type: "activity",
+          time: "11:00",
+          title: "Imaginary Museum",
+          details: "Gallery visit",
+          provider: "Local provider",
+        },
+      ],
+    },
+  ],
+  costBreakdown: [],
+};
+
+await enrichPlanV2(placesPlan, { mapsProvider: mockPlacesProvider });
+
+const enrichedEvent = placesPlan.itinerary[0].events[0];
+assert.equal(enrichedEvent.placeId, "mock-place-1");
+assert.equal(enrichedEvent.rating, 4.8);
+assert.equal(enrichedEvent.address, "1 Test Street, Test City");
+assert.equal(enrichedEvent.neighborhood, "Central");
+assert.equal(enrichedEvent.coordinateSource, "google_places");
+assert.equal(placesPlan.exactPlaceCount, 1);
+
+console.log("Plan v2 evaluation passed");

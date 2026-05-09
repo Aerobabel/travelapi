@@ -2041,12 +2041,14 @@ router.get("/travel/capabilities", (_req, res) => {
       provider: mapsProvider.provider,
       geocoding: mapsProvider.hasGeocoding,
       routing: mapsProvider.hasRouting,
+      places: mapsProvider.hasPlaces,
     },
     plan: {
       schemaVersion: "plan.v2",
       routeLegs: true,
       mapBounds: true,
       qualityScore: true,
+      placeEnrichment: true,
       heuristicFallback: true,
     },
   });

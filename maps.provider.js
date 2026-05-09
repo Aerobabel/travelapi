@@ -1,4 +1,5 @@
 const DEFAULT_TIMEOUT_MS = 5000;
+const MAX_PLACE_CACHE_SIZE = 500;
 
 const toNumber = (value) => {
   const n = Number(value);
@@ -103,6 +104,129 @@ const fetchJsonWithTimeout = async (url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}
     clearTimeout(timer);
   }
 };
+
+const placeCache = new Map();
+
+const setPlaceCache = (key, value) => {
+  if (!key) return;
+  if (placeCache.size >= MAX_PLACE_CACHE_SIZE) {
+    const first = placeCache.keys().next().value;
+    placeCache.delete(first);
+  }
+  placeCache.set(key, value);
+};
+
+const googlePhotoUrl = ({ reference, key, maxWidth = 960 }) => {
+  if (!reference || !key) return null;
+  const url = new URL("https://maps.googleapis.com/maps/api/place/photo");
+  url.searchParams.set("maxwidth", String(maxWidth));
+  url.searchParams.set("photo_reference", reference);
+  url.searchParams.set("key", key);
+  return url.toString();
+};
+
+const pickNeighborhood = (addressComponents = []) => {
+  const preferredTypes = [
+    "neighborhood",
+    "sublocality",
+    "sublocality_level_1",
+    "locality",
+  ];
+  for (const type of preferredTypes) {
+    const hit = addressComponents.find((part) => (part.types || []).includes(type));
+    if (hit?.long_name) return hit.long_name;
+  }
+  return null;
+};
+
+const normalizeGooglePlace = (raw = {}, key = "") => {
+  const loc = raw.geometry?.location || {};
+  const latitude = toNumber(loc.lat);
+  const longitude = toNumber(loc.lng);
+  const photoRef = raw.photos?.[0]?.photo_reference;
+  const weekdayText =
+    raw.current_opening_hours?.weekday_text ||
+    raw.opening_hours?.weekday_text ||
+    [];
+
+  return {
+    provider: "google_places",
+    placeId: raw.place_id || null,
+    name: raw.name || null,
+    address: raw.formatted_address || raw.vicinity || null,
+    latitude,
+    longitude,
+    rating: toNumber(raw.rating),
+    userRatingsTotal: toNumber(raw.user_ratings_total),
+    priceLevel: toNumber(raw.price_level),
+    businessStatus: raw.business_status || null,
+    types: raw.types || [],
+    openingHours: Array.isArray(weekdayText) ? weekdayText : [],
+    openNow:
+      raw.current_opening_hours?.open_now ??
+      raw.opening_hours?.open_now ??
+      null,
+    website: raw.website || null,
+    googleMapsUrl: raw.url || (raw.place_id ? `https://www.google.com/maps/place/?q=place_id:${raw.place_id}` : null),
+    editorialSummary: raw.editorial_summary?.overview || null,
+    neighborhood: pickNeighborhood(raw.address_components || []),
+    photoUrl: googlePhotoUrl({ reference: photoRef, key }),
+    confidence: raw.place_id ? "provider" : "search_result",
+  };
+};
+
+async function googlePlaceDetails({ placeId, key, timeoutMs }) {
+  if (!placeId) return null;
+  const url = new URL("https://maps.googleapis.com/maps/api/place/details/json");
+  url.searchParams.set("place_id", placeId);
+  url.searchParams.set(
+    "fields",
+    [
+      "place_id",
+      "name",
+      "formatted_address",
+      "address_components",
+      "geometry",
+      "rating",
+      "user_ratings_total",
+      "price_level",
+      "opening_hours",
+      "current_opening_hours",
+      "website",
+      "url",
+      "photos",
+      "business_status",
+      "types",
+      "editorial_summary",
+    ].join(",")
+  );
+  url.searchParams.set("key", key);
+
+  const payload = await fetchJsonWithTimeout(url.toString(), { timeoutMs });
+  if (payload?.status && payload.status !== "OK") {
+    throw new Error(`Google place details ${payload.status}: ${payload.error_message || ""}`.trim());
+  }
+  return normalizeGooglePlace(payload?.result || {}, key);
+}
+
+async function googleTextSearchPlace({ query, key, timeoutMs }) {
+  const url = new URL("https://maps.googleapis.com/maps/api/place/textsearch/json");
+  url.searchParams.set("query", query);
+  url.searchParams.set("key", key);
+
+  const payload = await fetchJsonWithTimeout(url.toString(), { timeoutMs });
+  if (payload?.status && !["OK", "ZERO_RESULTS"].includes(payload.status)) {
+    throw new Error(`Google text search ${payload.status}: ${payload.error_message || ""}`.trim());
+  }
+
+  const first = payload?.results?.[0];
+  if (!first) return null;
+  if (first.place_id) {
+    const detailed = await googlePlaceDetails({ placeId: first.place_id, key, timeoutMs });
+    if (detailed) return detailed;
+  }
+  return normalizeGooglePlace(first, key);
+}
 
 const googleMode = (mode) => {
   const normalized = normalizeMode(mode);
@@ -249,6 +373,7 @@ export function createMapsProvider({
     provider,
     hasGeocoding: Boolean(googleKey || mapboxToken),
     hasRouting: Boolean(googleKey || mapboxToken),
+    hasPlaces: Boolean(googleKey),
 
     async geocode(query) {
       const q = String(query || "").trim();
@@ -280,6 +405,31 @@ export function createMapsProvider({
 
       return estimateRouteLeg({ from: fromCoord, to: toCoord, mode: resolvedMode });
     },
+
+    async findPlace(query) {
+      const q = String(query || "").trim();
+      if (!q || !googleKey) return null;
+      const cacheKey = `google:${q.toLowerCase()}`;
+      if (placeCache.has(cacheKey)) return placeCache.get(cacheKey);
+
+      const place = await safeCall(() =>
+        googleTextSearchPlace({ query: q, key: googleKey, timeoutMs })
+      );
+      if (place) setPlaceCache(cacheKey, place);
+      return place;
+    },
+
+    async placeDetails(placeId) {
+      const id = String(placeId || "").trim();
+      if (!id || !googleKey) return null;
+      const cacheKey = `google-place-id:${id}`;
+      if (placeCache.has(cacheKey)) return placeCache.get(cacheKey);
+
+      const place = await safeCall(() =>
+        googlePlaceDetails({ placeId: id, key: googleKey, timeoutMs })
+      );
+      if (place) setPlaceCache(cacheKey, place);
+      return place;
+    },
   };
 }
-
