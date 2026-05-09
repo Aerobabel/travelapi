@@ -76,6 +76,7 @@ const logError = (id, ...args) => console.error(`[chat][${id}]`, ...args);
 const userMem = new Map();
 const imageCache = new Map();
 const zenHotelPageCache = new Map();
+const bookingLinkHealthCache = new Map();
 const rateHawkHotelInfoCache = new Map();
 
 function getMem(userId) {
@@ -387,13 +388,25 @@ function ensureWeather(plan) {
 
 // --- 2.1 AFFILIATE HELPERS ------------------------------------------------
 const sanitizeText = (val) => String(val || "").trim();
-const ACTIVITY_PROVIDER_HOSTS = [
-  "getyourguide.com",
-  "viator.com",
-  "headout.com",
-  "tiqets.com",
-  "klook.com",
+const ACTIVITY_PROVIDERS = [
+  { host: "getyourguide.com", name: "GetYourGuide" },
+  { host: "viator.com", name: "Viator" },
+  { host: "headout.com", name: "Headout" },
+  { host: "tiqets.com", name: "Tiqets" },
+  { host: "klook.com", name: "Klook" },
+  { host: "musement.com", name: "Musement" },
+  { host: "civitatis.com", name: "Civitatis" },
+  { host: "feverup.com", name: "Fever" },
+  { host: "airbnb.com", name: "Airbnb Experiences" },
+  { host: "tripadvisor.com", name: "Tripadvisor" },
+  { host: "expedia.com", name: "Expedia" },
 ];
+const ACTIVITY_PROVIDER_HOSTS = ACTIVITY_PROVIDERS.map((provider) => provider.host);
+const ACTIVITY_PROVIDER_NAMES = ACTIVITY_PROVIDERS.map((provider) => provider.name);
+const ACTIVITY_PROVIDER_QUERY_LIMIT = Math.max(
+  3,
+  Number(process.env.ACTIVITY_PROVIDER_QUERY_LIMIT || 9)
+);
 const LOOKUP_STOPWORDS = new Set([
   "the",
   "and",
@@ -453,12 +466,13 @@ function providerFromUrl(rawUrl = "") {
   const candidate = sanitizeText(rawUrl);
   if (!candidate) return "";
   try {
-    const host = new URL(candidate).hostname.replace(/^www\./i, "").toLowerCase();
-    if (host.includes("getyourguide")) return "GetYourGuide";
-    if (host.includes("viator")) return "Viator";
-    if (host.includes("headout")) return "Headout";
-    if (host.includes("tiqets")) return "Tiqets";
-    if (host.includes("klook")) return "Klook";
+    const parsed = new URL(candidate);
+    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+    const matched = ACTIVITY_PROVIDERS.find((provider) => {
+      const providerHost = provider.host.replace(/^www\./i, "").toLowerCase();
+      return host === providerHost || host.endsWith(`.${providerHost}`);
+    });
+    if (matched) return matched.name;
     const parts = host.split(".");
     const slug = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
     return prettifyProviderSlug(slug);
@@ -469,9 +483,21 @@ function providerFromUrl(rawUrl = "") {
 
 function isKnownActivityProviderName(value = "") {
   const lower = sanitizeText(value).toLowerCase();
-  return ["getyourguide", "viator", "headout", "tiqets", "klook"].some((name) =>
-    lower.includes(name)
-  );
+  return ACTIVITY_PROVIDERS.some(({ host, name }) => {
+    const slug = host.split(".")[0].toLowerCase();
+    return lower.includes(name.toLowerCase()) || lower.includes(slug);
+  });
+}
+
+function activityProviderHomeUrl(value = "") {
+  const lower = sanitizeText(value).toLowerCase();
+  const provider = ACTIVITY_PROVIDERS.find(({ host, name }) => {
+    const slug = host.split(".")[0].toLowerCase();
+    return lower.includes(name.toLowerCase()) || lower.includes(slug);
+  });
+  if (!provider) return "";
+  if (provider.host === "airbnb.com") return "https://www.airbnb.com/experiences";
+  return `https://www.${provider.host}`;
 }
 
 function stripActivitySiteSuffix(title = "", provider = "") {
@@ -488,6 +514,14 @@ function stripActivitySiteSuffix(title = "", provider = "") {
   if (providerPattern) cleaned = cleaned.replace(providerPattern, "").trim();
   cleaned = cleaned
     .replace(/\s*(?:\||-|–|—|•)\s*(GetYourGuide|Viator|Headout|Tiqets|Klook)(?:\s+.*)?$/i, "")
+    .trim();
+
+  const providerNamesPattern = ACTIVITY_PROVIDER_NAMES.map(escapeRegExp).join("|");
+  cleaned = cleaned
+    .replace(new RegExp(`\\s*(?:\\||-|\\u2013|\\u2014|\\u2022)\\s*(${providerNamesPattern})(?:\\s+.*)?$`, "i"), "")
+    .trim();
+  cleaned = cleaned
+    .replace(new RegExp(`\\s*(?:\\||-|â€“|â€”|â€¢)\\s*(${providerNamesPattern})(?:\\s+.*)?$`, "i"), "")
     .trim();
 
   return cleaned;
@@ -509,12 +543,14 @@ function isGenericProviderHomepage(rawUrl = "") {
       );
     }
 
-    if (
-      host.includes("viator") ||
-      host.includes("headout") ||
-      host.includes("tiqets") ||
-      host.includes("klook")
-    ) {
+    if (host.includes("airbnb")) {
+      return segments.length === 0 || segments[0] !== "experiences";
+    }
+
+    const matchedProvider = ACTIVITY_PROVIDER_HOSTS.some((providerHost) =>
+      host === providerHost || host.endsWith(`.${providerHost}`)
+    );
+    if (matchedProvider) {
       return segments.length === 0;
     }
 
@@ -587,6 +623,51 @@ function dedupeActivityResults(results = []) {
   }
 
   return out;
+}
+
+function diversifyActivityResults(results = [], limit = 10) {
+  const list = dedupeActivityResults(results);
+  const selected = [];
+  const usedKeys = new Set();
+  const providerCounts = new Map();
+
+  const add = (entry, maxPerProvider = Infinity) => {
+    if (!entry) return false;
+    const provider = sanitizeText(entry.provider) || providerFromUrl(entry.booking_url || "") || "local";
+    const key = normalizeLookupText(`${entry.title || ""} ${provider} ${entry.booking_url || ""}`);
+    if (!key || usedKeys.has(key)) return false;
+    const currentCount = providerCounts.get(provider) || 0;
+    if (currentCount >= maxPerProvider) return false;
+    selected.push(entry);
+    usedKeys.add(key);
+    providerCounts.set(provider, currentCount + 1);
+    return true;
+  };
+
+  const bookable = list.filter(
+    (entry) => entry?.booking_url && !isGenericProviderHomepage(entry.booking_url)
+  );
+  const local = list.filter((entry) => entry?.source === "local");
+  const rest = list.filter((entry) => !bookable.includes(entry) && !local.includes(entry));
+
+  for (const entry of bookable) {
+    if (selected.length >= limit) break;
+    add(entry, 1);
+  }
+  for (const entry of bookable) {
+    if (selected.length >= limit) break;
+    add(entry, 2);
+  }
+  for (const entry of local) {
+    if (selected.length >= limit) break;
+    add(entry);
+  }
+  for (const entry of [...bookable, ...rest]) {
+    if (selected.length >= limit) break;
+    add(entry);
+  }
+
+  return selected.slice(0, limit);
 }
 
 function pickActivityFromMemory(activityLikeText = "", activities = []) {
@@ -1273,6 +1354,62 @@ function appendQueryParams(url, params) {
   }
 }
 
+function responseLooksLikeMissingPage(text = "") {
+  const body = String(text || "").slice(0, 12000);
+  return /page\s+not\s+found/i.test(body) ||
+    /404\s+not\s+found/i.test(body) ||
+    /hotel\s+not\s+found/i.test(body) ||
+    /property\s+not\s+found/i.test(body);
+}
+
+async function validateBookingUrl(rawUrl = "", { reqId = null, requireZenHotelPage = false } = {}) {
+  const candidate = sanitizeText(rawUrl);
+  if (!candidate) return false;
+
+  const normalized = requireZenHotelPage ? normalizeZenHotelPageUrl(candidate) : candidate;
+  if (!normalized) return false;
+
+  const cacheKey = `${requireZenHotelPage ? "zen:" : "url:"}${normalized}`;
+  if (bookingLinkHealthCache.has(cacheKey)) return bookingLinkHealthCache.get(cacheKey);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const res = await fetch(normalized, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "Accept": "text/html,application/xhtml+xml",
+        "User-Agent": "Mozilla/5.0 NuviaTravelBot/1.0",
+      },
+    });
+
+    const finalUrl = res.url || normalized;
+    const statusOk = res.status >= 200 && res.status < 400;
+    const explicitMissingStatus = res.status === 404 || res.status === 410;
+    const stillHotelPage = requireZenHotelPage ? Boolean(normalizeZenHotelPageUrl(finalUrl)) : true;
+    const body = statusOk ? await res.text().catch(() => "") : "";
+    const ok = statusOk && !explicitMissingStatus && stillHotelPage && !responseLooksLikeMissingPage(body);
+
+    bookingLinkHealthCache.set(cacheKey, ok);
+    return ok;
+  } catch (e) {
+    logInfo(reqId || "n/a", "Booking link validation skipped", normalized, e?.message || e);
+    bookingLinkHealthCache.set(cacheKey, false);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function validateZenHotelPageUrl(rawUrl = "", reqId = null) {
+  const normalized = normalizeZenHotelPageUrl(rawUrl);
+  if (!normalized) return null;
+  const ok = await validateBookingUrl(normalized, { reqId, requireZenHotelPage: true });
+  return ok ? normalized : null;
+}
+
 async function resolveZenHotelPageViaSerp({ hotelName = "", city = "", reqId = null } = {}) {
   if (!SERPAPI_KEY) return null;
   const name = sanitizeText(hotelName);
@@ -1290,9 +1427,15 @@ async function resolveZenHotelPageViaSerp({ hotelName = "", city = "", reqId = n
     const links = (data?.organic_results || [])
       .map((r) => normalizeZenHotelPageUrl(r?.link))
       .filter(Boolean);
-    const chosen = links[0] || null;
-    if (chosen) zenHotelPageCache.set(cacheKey, chosen);
-    return chosen;
+    for (const link of links) {
+      const validated = await validateZenHotelPageUrl(link, reqId);
+      if (validated) {
+        zenHotelPageCache.set(cacheKey, validated);
+        return validated;
+      }
+    }
+    zenHotelPageCache.set(cacheKey, null);
+    return null;
   } catch (e) {
     logError(reqId || "n/a", "Zen hotel page lookup failed", e?.message || e);
     return null;
@@ -1328,7 +1471,10 @@ async function createAffiliateLink({
     resolvedHotelUrl = normalizeZenHotelPageUrl(resolved.hotelUrl);
   }
 
-  if (resolvedHotelUrl) return appendQueryParams(resolvedHotelUrl, params);
+  if (resolvedHotelUrl) {
+    const validatedHotelUrl = await validateZenHotelPageUrl(resolvedHotelUrl, reqId);
+    if (validatedHotelUrl) return appendQueryParams(validatedHotelUrl, params);
+  }
 
   const resolvedBySearch = await resolveZenHotelPageViaSerp({ hotelName, city, reqId });
   if (resolvedBySearch) return appendQueryParams(resolvedBySearch, params);
@@ -1433,14 +1579,14 @@ async function performGoogleSearch(rawQuery, reqId) {
         ? `${intent} in ${location}`
         : `${location} must do things`;
 
-      const organicQueries = specific && intent
-        ? [
-          `${intent} ${location} site:getyourguide.com OR site:viator.com OR site:headout.com OR site:tiqets.com OR site:klook.com`,
-          `${intent} ${location}`,
-        ]
-        : [
-          `${location} tours site:getyourguide.com OR site:viator.com OR site:headout.com`,
-        ];
+      const searchProviders = ACTIVITY_PROVIDERS.slice(0, ACTIVITY_PROVIDER_QUERY_LIMIT);
+      const organicQueries = searchProviders.map(({ host }) => {
+        const providerScope = host === "airbnb.com" ? "site:airbnb.com/experiences" : `site:${host}`;
+        return specific && intent
+          ? `${intent} ${location} ${providerScope}`
+          : `${location} tours tickets experiences ${providerScope}`;
+      });
+      if (specific && intent) organicQueries.push(`${intent} ${location} tours tickets`);
 
       const [localData, ...organicPayloads] = await Promise.all([
         fetchSerpJson({
@@ -1450,7 +1596,7 @@ async function performGoogleSearch(rawQuery, reqId) {
           type: "search",
         }, reqId).catch(() => null),
         ...organicQueries.map((q) =>
-          fetchSerpJson({ q, hl: "en", num: "10" }, reqId).catch(() => null)
+          fetchSerpJson({ q, hl: "en", num: "4" }, reqId).catch(() => null)
         ),
       ]);
 
@@ -1489,12 +1635,9 @@ async function performGoogleSearch(rawQuery, reqId) {
             source: "organic",
           });
         }
-        if (specific && organicResults.length > 0) break;
       }
 
-      const results = dedupeActivityResults(
-        specific ? [...organicResults, ...localResults] : [...organicResults, ...localResults]
-      ).slice(0, 10);
+      const results = diversifyActivityResults([...organicResults, ...localResults], 10);
 
       return JSON.stringify(results);
     }
@@ -1946,7 +2089,7 @@ When you call \`create_plan\`:
   - You MUST explicitly include these items if valid for the trip:
     - "Transfers" (e.g. "Transfer to hotel", "Transfer to airport") -> Provider "GetTransfer" or local.
     - "Insurance" (e.g. "Medical Insurance", "Visa Insurance") -> Provider "Axa" or "Allianz".
-    - "Excursions" (e.g. "City Tour", "Museum Ticket") -> Provider "GetYourGuide" or local.
+    - "Excursions" (e.g. "City Tour", "Museum Ticket") -> Provider from the searched activity result, such as Viator, Headout, Tiqets, Klook, Musement, Civitatis, Fever, Airbnb Experiences, GetYourGuide, or local.
   - Make sure to assign realistic prices to them.
   - If a searched excursion has a direct \`booking_url\`, pass that link through to the relevant excursion line item.
 
@@ -2644,11 +2787,7 @@ router.post("/travel", async (req, res) => {
               if (
                 !item.booking_url &&
                 matchedActivity &&
-                (lowerProv.includes("getyourguide") ||
-                  lowerProv.includes("viator") ||
-                  lowerProv.includes("headout") ||
-                  lowerProv.includes("tiqets") ||
-                  lowerProv.includes("klook") ||
+                (isKnownActivityProviderName(lowerProv) ||
                   lowerItem.includes("tour") ||
                   lowerItem.includes("ticket") ||
                   lowerItem.includes("excursion") ||
@@ -2664,8 +2803,7 @@ router.post("/travel", async (req, res) => {
               if (lowerProv.includes("gettransfer") || lowerItem.includes("transfer")) item.booking_url = "https://gettransfer.com";
               else if (lowerProv.includes("axa")) item.booking_url = "https://www.axa-schengen.com";
               else if (lowerProv.includes("allianz")) item.booking_url = "https://www.allianz-travel.com";
-              else if (lowerProv.includes("getyourguide")) item.booking_url = "https://www.getyourguide.com";
-              else if (lowerProv.includes("viator")) item.booking_url = "https://www.viator.com";
+              else if (isKnownActivityProviderName(lowerProv)) item.booking_url = activityProviderHomeUrl(lowerProv);
               else if (isAirbnb) item.booking_url = "https://www.airbnb.com";
             }
 
