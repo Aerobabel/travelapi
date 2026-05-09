@@ -298,6 +298,19 @@ function messageText(m = {}) {
 
 function parseGuestCountsFromText(text = "") {
   const raw = String(text || "");
+  try {
+    const parsed = JSON.parse(raw);
+    const adults = Number(parsed?.adults);
+    const children = Number(parsed?.children || 0);
+    if (Number.isFinite(adults) && adults > 0) {
+      return {
+        adults: Math.floor(adults),
+        children: Number.isFinite(children) && children > 0 ? Math.floor(children) : 0,
+      };
+    }
+  } catch {
+    // Not JSON; continue with text patterns.
+  }
   const matches = [
     raw.match(/guests:\s*(\d+)\s*adult(?:\(s\))?\s*,\s*(\d+)\s*child(?:\(ren\))?/i),
     raw.match(/there will be\s*(\d+)\s*adult(?:\(s\))?\s*and\s*(\d+)\s*child(?:\(ren\))?/i),
@@ -352,6 +365,15 @@ function applySystemContextToMemory(messages = [], mem) {
     } catch {
       // Context is best-effort; never block planning on parse failure.
     }
+  }
+}
+
+function applyClientToolFactsToMemory(messages = [], mem) {
+  if (!mem?.profile) return;
+  for (const message of messages) {
+    if (message?.role !== "tool") continue;
+    const guests = parseGuestCountsFromText(messageText(message));
+    if (guests) mem.profile.guest_counts = guests;
   }
 }
 
@@ -2314,9 +2336,8 @@ function normalizeMessages(messages = []) {
     .map((m) => {
       if (m.role === "tool") {
         return {
-          role: "tool",
-          tool_call_id: m.tool_call_id,
-          content: m.content,
+          role: "system",
+          content: `[CLIENT_TOOL_RESULT ${m.tool_call_id || "tool"}] ${String(m.content || "")}`,
         };
       }
       if (m.role === "user" && Array.isArray(m.content)) {
@@ -2372,6 +2393,7 @@ router.post("/travel", async (req, res) => {
     const persistedMemory = await persistence.loadUserMemory(userId);
     mergePersistedMemory(mem, persistedMemory);
     applySystemContextToMemory(messages, mem);
+    applyClientToolFactsToMemory(messages, mem);
     updateProfileFromHistory(messages, mem);
 
     const persistMemory = () => {
