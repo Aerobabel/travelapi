@@ -69,7 +69,7 @@ async function searchCities(query, limit = 8) {
       max: limit,
     });
     const cities = (response?.data || []).map(normalizeCity).filter(Boolean);
-    const merged = [...cities, ...localCityMatches(query, limit)];
+    const merged = [...localCityMatches(query, limit), ...cities];
     const seen = new Set();
     return merged.filter((city) => {
       const key = `${city.name}-${city.countryCode || ""}`.toLowerCase();
