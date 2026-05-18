@@ -726,6 +726,160 @@ function summarizeLinkIntegrity(plan = {}) {
   };
 }
 
+function classifyCostItem(item = {}) {
+  const text = sanitizeText(
+    [item.item, item.provider, item.details, item.iconType].filter(Boolean).join(" ")
+  ).toLowerCase();
+  if (item.raw || /\bflight\b|\bfly\b|\bairline\b|\bairways\b|\bticket\s*flight\b/.test(text)) return "flight";
+  if (/\bhotel\b|\bstay\b|\baccommodation\b|\blodging\b|\bzenhotels\b|\bratehawk\b|\bbooking\.com\b|\bbed\b/.test(text)) return "hotel";
+  if (/\btransfer\b|\btaxi\b|\bdriver\b|\bchauffeur\b|\bshuttle\b|\bgettransfer\b/.test(text)) return "transfer";
+  if (/\binsurance\b|\baxa\b|\ballianz\b/.test(text)) return "insurance";
+  if (isKnownActivityProviderName(text) || /\btour\b|\bticket\b|\bexcursion\b|\bactivity\b|\bexperience\b|\battraction\b|\bmuseum\b/.test(text)) return "activity";
+  return "other";
+}
+
+function hostFromUrl(rawUrl = "") {
+  try {
+    return new URL(sanitizeText(rawUrl)).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isZenAffiliateUrl(rawUrl = "") {
+  try {
+    const url = new URL(sanitizeText(rawUrl));
+    const host = url.hostname.replace(/^www\./i, "").toLowerCase();
+    if (host !== "zenhotels.com") return false;
+    const partner = url.searchParams.get("partner_slug") || "";
+    const source = url.searchParams.get("utm_source") || "";
+    return partner === ZEN_PARTNER_SLUG || source === ZEN_UTM_SOURCE;
+  } catch {
+    return false;
+  }
+}
+
+function buildSkyscannerActionUrl(item = {}) {
+  const raw = item.raw || {};
+  const origin = sanitizeText(raw.origin || raw.originCode || "").toLowerCase();
+  const destination = sanitizeText(raw.destination || raw.destinationCode || "").toLowerCase();
+  const date = sanitizeText(raw.departDate || raw.departureDate || "").slice(2, 10).replace(/-/g, "");
+  if (origin && destination && date) return `https://www.skyscanner.com/transport/flights/${origin}/${destination}/${date}`;
+  return "https://www.skyscanner.com/transport/flights/";
+}
+
+function actionLabelForCategory(category, url = "") {
+  const host = hostFromUrl(url);
+  if (category === "hotel") return host.includes("google") ? "View hotel" : "Book hotel";
+  if (category === "flight") return "Find flight";
+  if (category === "transfer") return "Book transfer";
+  if (category === "insurance") return "Get insurance";
+  if (category === "activity") return host.includes("google") ? "Open place" : "Find tickets";
+  return host.includes("google") ? "Open place" : "Open link";
+}
+
+function actionSourceForUrl(url = "", fallbackSource = "") {
+  const host = hostFromUrl(url);
+  if (!host) return fallbackSource || "missing";
+  if (isZenAffiliateUrl(url)) return "zen_affiliate";
+  if (host.includes("skyscanner")) return "flight_search";
+  if (host.includes("gettransfer")) return "transfer_provider";
+  if (host.includes("google.com") && sanitizeText(url).includes("/maps/")) return "google_maps";
+  if (ACTIVITY_PROVIDER_HOSTS.some((providerHost) => host === providerHost || host.endsWith(`.${providerHost}`))) {
+    return "activity_provider";
+  }
+  return fallbackSource || "provider_link";
+}
+
+async function ensureBookingActionForItem(item = {}, plan = {}, reqId = null) {
+  const category = classifyCostItem(item);
+  let url = sanitizeText(item.booking_url);
+  let fallbackSource = "";
+
+  if (isWeakBookingUrl(url)) {
+    if (category === "hotel") {
+      url = await createAffiliateLink({
+        hotelName: item.provider || item.item,
+        city: plan.location || plan.country || "",
+        checkIn: plan.itinerary?.[0]?.isoDate || null,
+        checkOut: plan.itinerary?.[plan.itinerary.length - 1]?.isoDate || null,
+        reqId,
+      });
+      fallbackSource = "zen_affiliate_fallback";
+    } else if (category === "flight") {
+      url = buildSkyscannerActionUrl(item);
+      fallbackSource = "flight_search_fallback";
+    } else if (category === "transfer") {
+      url = "https://gettransfer.com";
+      fallbackSource = "transfer_provider_fallback";
+    } else if (category === "insurance") {
+      const provider = sanitizeText(item.provider).toLowerCase();
+      url = provider.includes("allianz")
+        ? "https://www.allianz-travel.com"
+        : "https://www.axa-schengen.com";
+      fallbackSource = "insurance_provider_fallback";
+    } else if (category === "activity" && isKnownActivityProviderName(item.provider)) {
+      url = activityProviderSearchUrl(
+        item.provider,
+        [item.item, item.provider, plan.location].filter(Boolean).join(" ")
+      );
+      fallbackSource = "activity_provider_search";
+    } else {
+      url = buildGoogleMapsSearchUrl(
+        [item.provider, item.item, plan.location || plan.country].filter(Boolean).join(" ")
+      );
+      fallbackSource = "maps_place_lookup";
+    }
+  }
+
+  if (url) item.booking_url = url;
+
+  const source = actionSourceForUrl(url, fallbackSource);
+  const confidence =
+    !url ? "none" :
+      source === "zen_affiliate" || source === "provider_link" || source === "activity_provider" ? "high" :
+        source.includes("fallback") || source === "activity_provider_search" ? "medium" :
+          "low";
+
+  item.bookingAction = {
+    type: category,
+    label: actionLabelForCategory(category, url),
+    url: url || "",
+    source,
+    confidence,
+    referralApplied: category === "hotel" && isZenAffiliateUrl(url),
+    actionable: Boolean(url),
+    verified: Boolean(url) && !isWeakBookingUrl(url) && confidence !== "low",
+  };
+  return item.bookingAction;
+}
+
+async function applyBookingActions(plan = {}, { reqId = null } = {}) {
+  const items = Array.isArray(plan.costBreakdown) ? plan.costBreakdown : [];
+  for (const item of items) {
+    await ensureBookingActionForItem(item, plan, reqId);
+  }
+
+  const actions = items.map((item) => item.bookingAction).filter(Boolean);
+  const confidence = actions.reduce((acc, action) => {
+    const key = action.confidence || "unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  plan.bookingActionSummary = {
+    total: items.length,
+    actionable: actions.filter((action) => action.actionable).length,
+    verified: actions.filter((action) => action.verified).length,
+    referralApplied: actions.filter((action) => action.referralApplied).length,
+    confidence,
+    warnings: [
+      actions.some((action) => !action.actionable) ? "Some items do not have an actionable booking URL." : "",
+      actions.some((action) => action.confidence === "low") ? "Some actions are place lookups rather than direct booking links." : "",
+    ].filter(Boolean),
+  };
+}
+
 function parseActivitiesSearchQuery(rawQuery = "") {
   const cleaned = sanitizeText(String(rawQuery || "").replace("__activities__", ""));
   if (!cleaned) {
@@ -2452,6 +2606,8 @@ router.get("/travel/capabilities", (_req, res) => {
       heuristicFallback: true,
       linkIntegrity: true,
       genericGoogleSearchRepair: true,
+      bookingActions: true,
+      typedBookingActions: true,
     },
     persistence: {
       enabled: persistence.enabled,
@@ -3168,10 +3324,12 @@ router.post("/travel", async (req, res) => {
             profile: mem.profile,
           });
 
+          await applyBookingActions(plan, { reqId });
           plan.linkIntegrity = summarizeLinkIntegrity(plan);
           plan.providerConfidence = {
             ...(plan.providerConfidence || {}),
             linkIntegrity: plan.linkIntegrity,
+            bookingActions: plan.bookingActionSummary,
           };
 
           persistMemory();
