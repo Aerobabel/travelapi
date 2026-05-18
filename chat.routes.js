@@ -594,6 +594,28 @@ function activityProviderHomeUrl(value = "") {
   return `https://www.${provider.host}`;
 }
 
+function activityProviderSearchUrl(value = "", query = "") {
+  const lower = sanitizeText(value).toLowerCase();
+  const q = sanitizeText(query);
+  const provider = ACTIVITY_PROVIDERS.find(({ host, name }) => {
+    const slug = host.split(".")[0].toLowerCase();
+    return lower.includes(name.toLowerCase()) || lower.includes(slug);
+  });
+  if (!provider) return "";
+  if (!q) return activityProviderHomeUrl(value);
+  const encoded = encodeURIComponent(q);
+  if (provider.host === "getyourguide.com") return `https://www.getyourguide.com/s/?q=${encoded}`;
+  if (provider.host === "viator.com") return `https://www.viator.com/searchResults/all?text=${encoded}`;
+  if (provider.host === "headout.com") return `https://www.headout.com/search/?q=${encoded}`;
+  if (provider.host === "tiqets.com") return `https://www.tiqets.com/en/search/?q=${encoded}`;
+  if (provider.host === "klook.com") return `https://www.klook.com/search/result/?query=${encoded}`;
+  if (provider.host === "musement.com") return `https://www.musement.com/us/search/?q=${encoded}`;
+  if (provider.host === "civitatis.com") return `https://www.civitatis.com/en/search/?q=${encoded}`;
+  if (provider.host === "feverup.com") return `https://feverup.com/en/search?query=${encoded}`;
+  if (provider.host === "airbnb.com") return `https://www.airbnb.com/s/experiences?query=${encoded}`;
+  return activityProviderHomeUrl(value);
+}
+
 function stripActivitySiteSuffix(title = "", provider = "") {
   let cleaned = sanitizeText(title);
   if (!cleaned) return "";
@@ -652,6 +674,56 @@ function isGenericProviderHomepage(rawUrl = "") {
   } catch (e) {
     return false;
   }
+}
+
+function isGenericGoogleSearchUrl(rawUrl = "") {
+  const candidate = sanitizeText(rawUrl);
+  if (!candidate) return false;
+  try {
+    const parsed = new URL(candidate);
+    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+    const path = (parsed.pathname || "/").toLowerCase();
+    return host === "google.com" && path === "/search";
+  } catch {
+    return false;
+  }
+}
+
+function isWeakBookingUrl(rawUrl = "") {
+  const candidate = sanitizeText(rawUrl);
+  if (!candidate) return true;
+  return isGenericGoogleSearchUrl(candidate) || isGenericProviderHomepage(candidate);
+}
+
+function buildGoogleMapsSearchUrl(query = "") {
+  const q = sanitizeText(query);
+  if (!q) return "";
+  const url = new URL("https://www.google.com/maps/search/");
+  url.searchParams.set("api", "1");
+  url.searchParams.set("query", q);
+  return url.toString();
+}
+
+function summarizeLinkIntegrity(plan = {}) {
+  const costItems = Array.isArray(plan.costBreakdown) ? plan.costBreakdown : [];
+  const eventItems = (Array.isArray(plan.itinerary) ? plan.itinerary : [])
+    .flatMap((day) => (Array.isArray(day.events) ? day.events : []));
+  const weakCostItems = costItems.filter((item) => isWeakBookingUrl(item.booking_url));
+  const genericSearchLinks = [
+    ...costItems.filter((item) => isGenericGoogleSearchUrl(item.booking_url)),
+    ...eventItems.filter((event) => isGenericGoogleSearchUrl(event.booking_url)),
+  ];
+
+  return {
+    totalCostItems: costItems.length,
+    costItemsWithLinks: costItems.filter((item) => !isWeakBookingUrl(item.booking_url)).length,
+    weakCostItemLinks: weakCostItems.length,
+    genericGoogleSearchLinks: genericSearchLinks.length,
+    warnings: [
+      weakCostItems.length ? "Some cost items still use weak or missing booking links." : "",
+      genericSearchLinks.length ? "Generic Google Search links were detected." : "",
+    ].filter(Boolean),
+  };
 }
 
 function parseActivitiesSearchQuery(rawQuery = "") {
@@ -2378,6 +2450,8 @@ router.get("/travel/capabilities", (_req, res) => {
       placePhotoGallery: true,
       travelIntelligence: true,
       heuristicFallback: true,
+      linkIntegrity: true,
+      genericGoogleSearchRepair: true,
     },
     persistence: {
       enabled: persistence.enabled,
@@ -2908,7 +2982,7 @@ router.post("/travel", async (req, res) => {
                     mem?.lastActivities || []
                   );
                   if (matchedActivity) {
-                    if ((!ev.booking_url || isGenericProviderHomepage(ev.booking_url)) && matchedActivity.booking_url) {
+                    if (isWeakBookingUrl(ev.booking_url) && matchedActivity.booking_url) {
                       ev.booking_url = matchedActivity.booking_url;
                     }
                     if ((!ev.provider || isKnownActivityProviderName(ev.provider)) && matchedActivity.provider) {
@@ -2976,7 +3050,7 @@ router.post("/travel", async (req, res) => {
               mem?.lastActivities || []
             );
             const needsSpecificActivityLink =
-              !item.booking_url || isGenericProviderHomepage(item.booking_url);
+              isWeakBookingUrl(item.booking_url);
 
             if (isHotelLike) {
               const matchedHotel = pickHotelFromMemory(item.provider || item.item, mem?.lastHotels || []);
@@ -3042,12 +3116,28 @@ router.post("/travel", async (req, res) => {
               }
             }
 
-            if (!item.booking_url) {
-              if (lowerProv.includes("gettransfer") || lowerItem.includes("transfer")) item.booking_url = "https://gettransfer.com";
+            if (isWeakBookingUrl(item.booking_url)) {
+              if (lowerItem.includes("flight") || lowerItem.includes("fly") || lowerItem.includes("airline")) item.booking_url = "https://www.skyscanner.com/transport/flights/";
+              else if (lowerProv.includes("gettransfer") || lowerItem.includes("transfer")) item.booking_url = "https://gettransfer.com";
               else if (lowerProv.includes("axa")) item.booking_url = "https://www.axa-schengen.com";
               else if (lowerProv.includes("allianz")) item.booking_url = "https://www.allianz-travel.com";
-              else if (isKnownActivityProviderName(lowerProv)) item.booking_url = activityProviderHomeUrl(lowerProv);
+              else if (isKnownActivityProviderName(lowerProv)) {
+                item.booking_url = activityProviderSearchUrl(
+                  lowerProv,
+                  [item.item, item.provider, plan.location].filter(Boolean).join(" ")
+                );
+              }
               else if (isAirbnb) item.booking_url = "https://www.airbnb.com";
+              else if (lowerItem.includes("tour") || lowerItem.includes("ticket") || lowerItem.includes("excursion")) {
+                item.booking_url = buildGoogleMapsSearchUrl(
+                  [item.provider, item.item, plan.location].filter(Boolean).join(" ")
+                );
+                item.sourceConfidence = {
+                  ...(item.sourceConfidence || {}),
+                  confidence: "low",
+                  source: "maps_place_lookup",
+                };
+              }
             }
 
             // Domain/Favicon logic
@@ -3077,6 +3167,12 @@ router.post("/travel", async (req, res) => {
           await enrichTravelIntelligence(plan, {
             profile: mem.profile,
           });
+
+          plan.linkIntegrity = summarizeLinkIntegrity(plan);
+          plan.providerConfidence = {
+            ...(plan.providerConfidence || {}),
+            linkIntegrity: plan.linkIntegrity,
+          };
 
           persistMemory();
           if (persistence.enabled) {
