@@ -2640,11 +2640,104 @@ router.get("/travel/capabilities", (_req, res) => {
   });
 });
 
-router.post("/travel", async (req, res) => {
+const TRAVEL_JOB_TTL_MS = 10 * 60 * 1000;
+const travelJobs = new Map();
+
+const SESSION_MODE = Object.freeze({
+  CONVERSATION: "conversation",
+  COLLECTING_TRIP_INFO: "collectingTripInfo",
+  PLANNING_TRIP: "planningTrip",
+  PLAN_READY: "planReady",
+});
+
+function cleanupTravelJobs() {
+  const cutoff = Date.now() - TRAVEL_JOB_TTL_MS;
+  for (const [jobId, job] of travelJobs.entries()) {
+    if ((job.updatedAt || 0) < cutoff) travelJobs.delete(jobId);
+  }
+}
+
+function updateTravelJob(jobId, patch) {
+  const current = travelJobs.get(jobId);
+  if (!current) return;
+  travelJobs.set(jobId, {
+    ...current,
+    ...patch,
+    updatedAt: Date.now(),
+  });
+}
+
+function getToolSessionStatus(toolName, args = {}) {
+  if (toolName === "request_dates") {
+    return {
+      sessionMode: SESSION_MODE.COLLECTING_TRIP_INFO,
+      stage: "collecting_dates",
+      message: "Choosing travel dates...",
+    };
+  }
+
+  if (toolName === "request_guests") {
+    return {
+      sessionMode: SESSION_MODE.COLLECTING_TRIP_INFO,
+      stage: "collecting_guests",
+      message: "Confirming travelers...",
+    };
+  }
+
+  if (toolName === "search_flights") {
+    return {
+      sessionMode: SESSION_MODE.PLANNING_TRIP,
+      stage: "searching_flights",
+      message: "Finding the best flights...",
+    };
+  }
+
+  if (toolName === "search_hotels") {
+    return {
+      sessionMode: SESSION_MODE.PLANNING_TRIP,
+      stage: "searching_hotels",
+      message: "Searching for hotels...",
+    };
+  }
+
+  if (toolName === "search_google") {
+    const query = String(args?.query || "");
+    const message = query.startsWith("__restaurants__")
+      ? "Finding real restaurants..."
+      : query.startsWith("__activities__")
+        ? "Adding local activities..."
+        : "Finding real places...";
+    return {
+      sessionMode: SESSION_MODE.PLANNING_TRIP,
+      stage: "searching_places",
+      message,
+    };
+  }
+
+  if (toolName === "create_plan") {
+    return {
+      sessionMode: SESSION_MODE.PLANNING_TRIP,
+      stage: "creating_plan",
+      message: "Building your itinerary...",
+    };
+  }
+
+  return null;
+}
+
+async function executeTravelRequest(body = {}, { onStatus } = {}) {
   const reqId = newReqId();
+  const emitStatus = (status) => {
+    if (!status || typeof onStatus !== "function") return;
+    onStatus({
+      ...status,
+      reqId,
+      updatedAt: new Date().toISOString(),
+    });
+  };
 
   try {
-    const { messages = [], userId = "anonymous" } = req.body || {};
+    const { messages = [], userId = "anonymous" } = body || {};
     const mem = getMem(userId);
     const persistedMemory = await persistence.loadUserMemory(userId);
     mergePersistedMemory(mem, persistedMemory);
@@ -2664,7 +2757,7 @@ router.post("/travel", async (req, res) => {
     persistMemory();
 
     if (!hasKey || !client) {
-      return res.json({ aiText: "API Key missing. Cannot plan trip." });
+      return { aiText: "API Key missing. Cannot plan trip." };
     }
 
     const systemPrompt = getSystemPrompt(mem.profile);
@@ -2715,6 +2808,7 @@ router.post("/travel", async (req, res) => {
         }
 
         logInfo(reqId, `[Tool] ${toolName}`, args);
+        emitStatus(getToolSessionStatus(toolName, args));
 
         const assistantMsgSanitized = {
           ...msg,
@@ -3390,6 +3484,11 @@ router.post("/travel", async (req, res) => {
           reqId,
           "[Guardrail] Intercepted text itinerary. Forcing model to use create_plan instead."
         );
+        emitStatus({
+          sessionMode: SESSION_MODE.PLANNING_TRIP,
+          stage: "creating_plan",
+          message: "Building your itinerary...",
+        });
 
         const newConversation = [
           ...conversation,
@@ -3456,6 +3555,11 @@ router.post("/travel", async (req, res) => {
 
       if (looksLikePlanAnnouncement && depth < 7) {
         logInfo(reqId, "[Guardrail] Intercepted plan announcement without tool call. Forcing create_plan.");
+        emitStatus({
+          sessionMode: SESSION_MODE.PLANNING_TRIP,
+          stage: "creating_plan",
+          message: "Building your itinerary...",
+        });
         const newConversation = [
           ...conversation,
           msg,
@@ -3478,11 +3582,71 @@ router.post("/travel", async (req, res) => {
 
     const response = await runConversation(baseHistory);
     if (response.aiText) response.aiText = stripMarkdown(response.aiText);
-    return res.json(response);
+    return response;
   } catch (err) {
     logError(reqId, "Route Error", err);
-    return res.status(500).json({ aiText: "Server error." });
+    return { aiText: "Server error.", error: "server_error" };
   }
+}
+
+router.post("/travel/jobs", (req, res) => {
+  cleanupTravelJobs();
+  const jobId = newReqId();
+  travelJobs.set(jobId, {
+    jobId,
+    done: false,
+    sessionMode: SESSION_MODE.CONVERSATION,
+    stage: "queued",
+    message: "Starting request...",
+    result: null,
+    error: null,
+    updatedAt: Date.now(),
+  });
+
+  res.status(202).json({ jobId });
+
+  Promise.resolve()
+    .then(async () => {
+      updateTravelJob(jobId, {
+        sessionMode: SESSION_MODE.CONVERSATION,
+        stage: "running",
+        message: "Reading your message...",
+      });
+      const result = await executeTravelRequest(req.body || {}, {
+        onStatus: (status) => updateTravelJob(jobId, status),
+      });
+      updateTravelJob(jobId, {
+        done: true,
+        sessionMode: result?.signal?.type === "planReady" ? SESSION_MODE.PLAN_READY : undefined,
+        stage: result?.signal?.type || "done",
+        message: result?.signal?.type === "planReady" ? "Trip plan ready." : "Response ready.",
+        result,
+      });
+    })
+    .catch((error) => {
+      updateTravelJob(jobId, {
+        done: true,
+        error: "server_error",
+        result: { aiText: "Server error.", error: "server_error" },
+        message: error?.message || "Server error.",
+      });
+    });
+});
+
+router.get("/travel/jobs/:jobId", (req, res) => {
+  const job = travelJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "job_not_found" });
+  }
+  return res.json(job);
+});
+
+router.post("/travel", async (req, res) => {
+  const response = await executeTravelRequest(req.body || {});
+  if (response?.error === "server_error") {
+    return res.status(500).json(response);
+  }
+  return res.json(response);
 });
 
 export default router;
