@@ -482,6 +482,30 @@ function isFlightLikeEvent(event = {}) {
     /\bflight\b|\bairways?\b|\bairlines?\b|\bairport\s*\([A-Z]{3}\)\s*(?:to|->|â†’)/i.test(text);
 }
 
+function normalizeCompactDuration(value = "") {
+  const text = sanitizeText(value)
+    .replace(/(\d{1,2})\s*h\s*(\d{1,2})\s*m/gi, "$1h $2m")
+    .replace(/\s+/g, " ");
+  const match = text.match(/(\d{1,2})\s*h(?:\s*(\d{1,2})\s*m)?/i);
+  if (!match) return "";
+  return `${match[1]}h${match[2] ? ` ${match[2]}m` : ""}`;
+}
+
+function normalizeFlightEventText(value = "") {
+  const text = sanitizeText(value);
+  if (!text) return "";
+  return text
+    .replace(/(\d{1,2})\s*h\s*(\d{1,2})\s*m/gi, "$1h $2m")
+    .replace(/\b(\d+)\s*stop\b/gi, "$1 stop")
+    .replace(/dependsonconnection/gi, "depends on connection")
+    .replace(/,\s*/g, ", ")
+    .replace(/\(\s*/g, " (")
+    .replace(/\s*\)/g, ")")
+    .replace(/\s*[-–]\s*/g, " - ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 const ACTIVITY_PROVIDERS = [
   { host: "getyourguide.com", name: "GetYourGuide" },
   { host: "viator.com", name: "Viator" },
@@ -3131,6 +3155,9 @@ router.post("/travel", async (req, res) => {
                 } else if (isFlightLikeEvent(ev)) {
                   ev.type = "flight";
                   ev.icon = "flight";
+                  const compactDuration = normalizeCompactDuration(ev.duration || ev.details);
+                  if (compactDuration) ev.duration = compactDuration;
+                  if (ev.details) ev.details = normalizeFlightEventText(ev.details);
                 }
                 if (ev.type === "activity") {
                   const matchedActivity = pickActivityFromMemory(
