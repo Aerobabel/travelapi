@@ -215,6 +215,26 @@ const applyMemoryPlace = (event, match) => {
   };
 };
 
+const imageUrlFromValue = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value !== "object") return "";
+  return value.url || value.uri || value.image || value.imageUrl || value.image_url || value.photoUrl || value.photo_url || "";
+};
+
+const mergeImageValues = (...groups) => {
+  const seen = new Set();
+  return groups
+    .flatMap((group) => (Array.isArray(group) ? group : [group]))
+    .filter(Boolean)
+    .filter((value) => {
+      const url = String(imageUrlFromValue(value)).trim();
+      if (!url || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+};
+
 const applyProviderPlace = (event, place) => {
   if (!place) return;
   if (place.name) {
@@ -239,6 +259,13 @@ const applyProviderPlace = (event, place) => {
   if (place.website && !event.website) event.website = place.website;
   if (place.googleMapsUrl) event.googleMapsUrl = place.googleMapsUrl;
   if (place.photoUrl) event.photoUrl = place.photoUrl;
+  if (Array.isArray(place.photoUrls) && place.photoUrls.length) {
+    event.photoUrls = mergeImageValues(event.photoUrls, place.photoUrls);
+    event.images = mergeImageValues(event.images, place.photoUrls);
+  }
+  if (Array.isArray(place.photos) && place.photos.length) {
+    event.photos = mergeImageValues(event.photos, place.photos);
+  }
   if (place.editorialSummary && !event.details) event.details = place.editorialSummary;
   if (place.neighborhood) event.neighborhood = place.neighborhood;
   if (!hasCoordinates(event) && place.latitude !== null && place.longitude !== null) {
@@ -564,10 +591,11 @@ export async function enrichPlanV2(plan, { mapsProvider, memories = {}, logger =
   plan.schemaVersion = "plan.v2";
   plan.generatedAt = plan.generatedAt || new Date().toISOString();
   plan.enrichment = {
-    version: "2026-05-09",
+    version: "2026-05-18",
     mapsProvider: mapsProvider?.provider || "heuristic",
     hasProviderGeocoding: Boolean(mapsProvider?.hasGeocoding),
     hasProviderRouting: Boolean(mapsProvider?.hasRouting),
+    hasProviderPlacePhotos: Boolean(mapsProvider?.hasPlacePhotos),
   };
 
   for (let dayIndex = 0; dayIndex < days.length; dayIndex += 1) {

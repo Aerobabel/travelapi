@@ -2367,6 +2367,7 @@ router.get("/travel/capabilities", (_req, res) => {
       geocoding: mapsProvider.hasGeocoding,
       routing: mapsProvider.hasRouting,
       places: mapsProvider.hasPlaces,
+      placePhotos: mapsProvider.hasPlacePhotos,
     },
     plan: {
       schemaVersion: "plan.v2",
@@ -2374,6 +2375,7 @@ router.get("/travel/capabilities", (_req, res) => {
       mapBounds: true,
       qualityScore: true,
       placeEnrichment: true,
+      placePhotoGallery: true,
       travelIntelligence: true,
       heuristicFallback: true,
     },

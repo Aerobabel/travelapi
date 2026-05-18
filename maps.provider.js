@@ -1,5 +1,6 @@
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_PLACE_CACHE_SIZE = 500;
+const MAX_GOOGLE_PLACE_PHOTOS = 6;
 
 const toNumber = (value) => {
   const n = Number(value);
@@ -125,6 +126,25 @@ const googlePhotoUrl = ({ reference, key, maxWidth = 960 }) => {
   return url.toString();
 };
 
+const normalizeGooglePhotos = (photos = [], key = "") => {
+  if (!Array.isArray(photos) || !key) return [];
+  return photos
+    .slice(0, MAX_GOOGLE_PLACE_PHOTOS)
+    .map((photo) => {
+      const reference = photo?.photo_reference;
+      const url = googlePhotoUrl({ reference, key });
+      if (!url) return null;
+      return {
+        url,
+        width: toNumber(photo.width),
+        height: toNumber(photo.height),
+        attributions: Array.isArray(photo.html_attributions) ? photo.html_attributions : [],
+        source: "google_places",
+      };
+    })
+    .filter(Boolean);
+};
+
 const pickNeighborhood = (addressComponents = []) => {
   const preferredTypes = [
     "neighborhood",
@@ -143,7 +163,8 @@ const normalizeGooglePlace = (raw = {}, key = "") => {
   const loc = raw.geometry?.location || {};
   const latitude = toNumber(loc.lat);
   const longitude = toNumber(loc.lng);
-  const photoRef = raw.photos?.[0]?.photo_reference;
+  const photos = normalizeGooglePhotos(raw.photos, key);
+  const photoUrls = photos.map((photo) => photo.url);
   const weekdayText =
     raw.current_opening_hours?.weekday_text ||
     raw.opening_hours?.weekday_text ||
@@ -170,7 +191,9 @@ const normalizeGooglePlace = (raw = {}, key = "") => {
     googleMapsUrl: raw.url || (raw.place_id ? `https://www.google.com/maps/place/?q=place_id:${raw.place_id}` : null),
     editorialSummary: raw.editorial_summary?.overview || null,
     neighborhood: pickNeighborhood(raw.address_components || []),
-    photoUrl: googlePhotoUrl({ reference: photoRef, key }),
+    photoUrl: photoUrls[0] || null,
+    photoUrls,
+    photos,
     confidence: raw.place_id ? "provider" : "search_result",
   };
 };
@@ -398,6 +421,7 @@ export function createMapsProvider({
     hasGeocoding: Boolean(googleKey || mapboxToken),
     hasRouting: Boolean(googleKey || mapboxToken),
     hasPlaces: Boolean(googleKey),
+    hasPlacePhotos: Boolean(googleKey),
 
     async geocode(query) {
       const q = String(query || "").trim();
