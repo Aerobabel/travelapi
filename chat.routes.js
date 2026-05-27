@@ -10,6 +10,10 @@ import {
   createPersistence,
   mergePersistedMemory,
 } from "./persistence.js";
+import {
+  mergeFlightOffers,
+  searchDuffelOffers,
+} from "./duffel.provider.js";
 import { enrichTravelIntelligence } from "./travel-intelligence.js";
 
 dotenv.config();
@@ -56,6 +60,7 @@ const RATEHAWK_TIMEOUT_MS = Number(process.env.RATEHAWK_TIMEOUT_MS || 4500);
 const RATEHAWK_RESIDENCY_DEFAULT = String(process.env.RATEHAWK_RESIDENCY || "us")
   .trim()
   .toLowerCase();
+const FLIGHT_CURRENCY_CODE = String(process.env.FLIGHT_CURRENCY_CODE || "USD").toUpperCase();
 
 const ZEN_PARTNER_SLUG = process.env.ZEN_PARTNER_SLUG || "285572.affiliate.37e8";
 const ZEN_UTM_CAMPAIGN = process.env.ZEN_UTM_CAMPAIGN || "en-en, deeplink, affiliate";
@@ -158,6 +163,7 @@ const getCode = (label) => {
 const normalizeOffer = (fo, dictionaries = {}) => {
   const priceObj = fo?.price || {};
   const price = Number(priceObj.grandTotal || priceObj.total || 0);
+  const currency = priceObj.currency || "USD";
 
   const it = fo?.itineraries?.[0];
   const segs = it?.segments || [];
@@ -230,7 +236,11 @@ const normalizeOffer = (fo, dictionaries = {}) => {
   }
 
   return {
+    id: fo?.id ? `amadeus-${fo.id}` : undefined,
+    source: "amadeus",
+    provider: "Amadeus",
     price,
+    currency,
     airline: carrier,
     flightNumber,
     duration,
@@ -2208,7 +2218,7 @@ const tools = [
     type: "function",
     function: {
       name: "search_flights",
-      description: "Search for real flights using Amadeus. Use return_date only when the user wants a round-trip. Omit return_date for one-way searches. Results are sorted cheapest-first.",
+      description: "Search for real flights using Amadeus and Duffel. Use return_date only when the user wants a round-trip. Omit return_date for one-way searches. Results are sorted cheapest-first.",
       parameters: {
         type: "object",
         properties: {
@@ -2855,13 +2865,14 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
           return runConversation(newHistory, depth + 1);
         }
 
-        // A2. SEARCH FLIGHTS (AMADEUS)
+        // A2. SEARCH FLIGHTS (AMADEUS + DUFFEL)
         if (toolName === "search_flights") {
           let result = "No flights found.";
           try {
             const originCode = getCode(args.origin) || args.origin.toUpperCase();
             const destCode = getCode(args.destination) || args.destination.toUpperCase();
             const adultCount = Math.max(1, Math.floor(Number(mem?.profile?.guest_counts?.adults) || 1));
+            const passengerCounts = { adults: adultCount, children: 0, infants: 0 };
             const travelers = Array.from({ length: adultCount }, (_, idx) => ({
               id: String(idx + 1),
               travelerType: "ADULT",
@@ -2885,29 +2896,52 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
               });
             }
 
-            const response = await amadeus.shopping.flightOffersSearch.post(JSON.stringify({
-              currencyCode: 'USD',
-              originDestinations,
-              travelers,
-              sources: ['GDS'],
-              searchCriteria: {
-                maxFlightOffers: 20,
-                flightFilters: {
-                  cabinRestrictions: [{
-                    cabin: "ECONOMY",
-                    coverage: "MOST_SEGMENTS",
-                    originDestinationIds: ["1"]
-                  }]
-                }
-              }
-            }));
-            const data = response.data;
-            const dictionaries = response.result?.dictionaries || {};
+            let amadeusOffers = [];
+            let duffelOffers = [];
+            const providerNotes = [];
 
-            // Sort by price ascending to surface cheapest options first
-            const sorted = (data || [])
-              .map(o => normalizeOffer(o, dictionaries))
-              .sort((a, b) => (a.price || 9999) - (b.price || 9999));
+            try {
+              const response = await amadeus.shopping.flightOffersSearch.post(JSON.stringify({
+                currencyCode: FLIGHT_CURRENCY_CODE,
+                originDestinations,
+                travelers,
+                sources: ['GDS'],
+                searchCriteria: {
+                  maxFlightOffers: 30,
+                  flightFilters: {
+                    cabinRestrictions: [{
+                      cabin: "ECONOMY",
+                      coverage: "MOST_SEGMENTS",
+                      originDestinationIds: originDestinations.map((od) => od.id)
+                    }]
+                  }
+                }
+              }));
+              const data = response.data;
+              const dictionaries = response.result?.dictionaries || {};
+              amadeusOffers = (data || []).map(o => normalizeOffer(o, dictionaries));
+            } catch (e) {
+              providerNotes.push(`Amadeus failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`);
+              logError(reqId, "Amadeus Flight Error", e);
+            }
+
+            try {
+              const duffelResult = await searchDuffelOffers({
+                originDestinations,
+                passengers: passengerCounts,
+                travelClass: "ECONOMY",
+              });
+              duffelOffers = duffelResult?.offers || [];
+            } catch (e) {
+              if (e?.code === "DUFFEL_MISSING_TOKEN") {
+                providerNotes.push("Duffel skipped: access token is not configured.");
+              } else {
+                providerNotes.push(`Duffel failed: ${e.message}`);
+                logError(reqId, "Duffel Flight Error", e);
+              }
+            }
+
+            const sorted = mergeFlightOffers(amadeusOffers, duffelOffers);
 
             const top = sorted.slice(0, 10);
             if (top.length) {
@@ -2917,13 +2951,21 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
                 const route = `${n.origin || originCode}->${n.destination || destCode}`;
                 const stopsPart = n.stops === 0 ? "Direct" : `${n.stops} stop${n.stops > 1 ? 's' : ''}`;
                 const retPart = n.isRoundTrip ? " (round-trip)" : "";
+                const currency = n.currency === "USD" || !n.currency ? "$" : `${n.currency} `;
+                const provider = n.provider || n.source || "provider";
+                const flightNumber = n.flightNumber ? ` ${n.flightNumber}` : "";
+                return `${i + 1}. ${n.airline}${flightNumber} ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart})${retPart} - ${currency}${n.price} (${provider})`;
+                /*
                 return `${i + 1}. ${n.airline} ${n.flightNumber} ${route}: ${n.depart}-${n.arrive} (${n.duration}, ${stopsPart})${retPart} — $${n.price}`;
+                */
               }).join('\n');
-              result = `Found ${sorted.length} options. Top ${top.length} cheapest. Prices are total for ${adultCount} adult(s):\n${result}`;
+              result = `Found ${sorted.length} merged options (Amadeus ${amadeusOffers.length}, Duffel ${duffelOffers.length}). Top ${top.length} cheapest. Prices are total for ${adultCount} adult(s):\n${result}`;
+            } else if (providerNotes.length) {
+              result = `No flights found. ${providerNotes.join(" ")}`;
             }
           } catch (e) {
             result = `Flight search failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`;
-            logError(reqId, "Amadeus Flight Error", e);
+            logError(reqId, "Flight Search Error", e);
           }
           persistMemory();
           newHistory.push({

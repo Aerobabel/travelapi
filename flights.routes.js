@@ -1,6 +1,11 @@
 // flights.routes.js
 import express from 'express';
 import Amadeus from 'amadeus';
+import {
+  mergeFlightOffers,
+  refreshDuffelOffer,
+  searchDuffelOffers,
+} from './duffel.provider.js';
 
 const router = express.Router();
 
@@ -71,6 +76,8 @@ const normalizeOffer = (fo) => {
 
   return {
     id: fo?.id || `${airportFrom}-${airportTo}-${depart}`,
+    source: 'amadeus',
+    provider: 'Amadeus',
     price: price, // Return raw float (e.g. 150.50)
     currency,     // Return currency code
     airline: carrier,
@@ -131,6 +138,7 @@ router.post('/flights/search', async (req, res) => {
       currencyCode = 'USD',
       legs = [],
     } = req.body || {};
+    const searchCurrencyCode = String(process.env.FLIGHT_CURRENCY_CODE || currencyCode || 'USD').toUpperCase();
 
     // Build originDestinations
     const originDestinations = [];
@@ -177,7 +185,7 @@ router.post('/flights/search', async (req, res) => {
     const originDestinationIds = originDestinations.map(o => o.id);
 
     const payload = {
-      currencyCode,
+      currencyCode: searchCurrencyCode,
       originDestinations,
       travelers: travelers.length ? travelers : [{ id: '1', travelerType: 'ADULT' }],
       sources: ['GDS'],
@@ -190,11 +198,62 @@ router.post('/flights/search', async (req, res) => {
       },
     };
 
-    // CRITICAL: Amadeus SDK .post() requires a STRING body
-    const { data } = await amadeus.shopping.flightOffersSearch.post(JSON.stringify(payload));
-    const offers = (data || []).map(normalizeOffer);
+    const providerResults = await Promise.allSettled([
+      amadeus.shopping.flightOffersSearch.post(JSON.stringify(payload)),
+      searchDuffelOffers({ originDestinations, passengers, travelClass }),
+    ]);
 
-    res.json({ offers });
+    let amadeusOffers = [];
+    let duffelOffers = [];
+    const providers = {
+      amadeus: { ok: false, count: 0 },
+      duffel: { ok: false, count: 0 },
+    };
+
+    if (providerResults[0].status === 'fulfilled') {
+      amadeusOffers = (providerResults[0].value?.data || []).map(normalizeOffer);
+      providers.amadeus = { ok: true, count: amadeusOffers.length };
+    } else {
+      providers.amadeus = {
+        ok: false,
+        count: 0,
+        error: providerResults[0].reason?.response?.result?.errors?.[0]?.detail ||
+          providerResults[0].reason?.message ||
+          'Amadeus search failed',
+      };
+      console.error('amadeus flights search error', providerResults[0].reason);
+    }
+
+    if (providerResults[1].status === 'fulfilled') {
+      duffelOffers = providerResults[1].value?.offers || [];
+      providers.duffel = {
+        ok: true,
+        count: duffelOffers.length,
+        offerRequestId: providerResults[1].value?.offerRequestId,
+      };
+    } else {
+      providers.duffel = {
+        ok: false,
+        count: 0,
+        error: providerResults[1].reason?.message || 'Duffel search failed',
+      };
+      if (providerResults[1].reason?.code !== 'DUFFEL_MISSING_TOKEN') {
+        console.error('duffel flights search error', providerResults[1].reason);
+      }
+    }
+
+    const offers = mergeFlightOffers(amadeusOffers, duffelOffers);
+
+    if (!offers.length && providerResults[0].status === 'rejected' && providerResults[1].status === 'rejected') {
+      const api = providerResults[0].reason?.response?.result;
+      if (api?.errors) return res.status(400).json(api);
+      return res.status(502).json({
+        error: 'No flight provider returned offers',
+        providers,
+      });
+    }
+
+    res.json({ offers, providers });
   } catch (err) {
     console.error('flights search error', err);
     const api = err?.response?.result;
@@ -240,6 +299,26 @@ router.post('/flights/price', async (req, res) => {
   try {
     const offer = req.body?.offer;
     if (!offer) return res.status(400).json({ error: 'Missing offer' });
+
+    if (offer?.provider === 'duffel') {
+      const offerId = offer.id || offer.providerOfferId;
+      const { offer: refreshed } = await refreshDuffelOffer(offerId);
+      return res.json({
+        priced: {
+          data: {
+            flightOffers: [
+              {
+                price: {
+                  grandTotal: String(refreshed.price),
+                  currency: refreshed.currency,
+                },
+              },
+            ],
+          },
+        },
+        offer: refreshed,
+      });
+    }
 
     const payload = {
       data: {
