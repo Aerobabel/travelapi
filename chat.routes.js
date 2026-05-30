@@ -768,10 +768,10 @@ function classifyCostItem(item = {}) {
   const text = sanitizeText(
     [item.item, item.provider, item.details, item.iconType].filter(Boolean).join(" ")
   ).toLowerCase();
-  if (item.raw || /\bflight\b|\bfly\b|\bairline\b|\bairways\b|\bticket\s*flight\b/.test(text)) return "flight";
-  if (/\bhotel\b|\bstay\b|\baccommodation\b|\blodging\b|\bzenhotels\b|\bratehawk\b|\bbooking\.com\b|\bbed\b/.test(text)) return "hotel";
   if (/\btransfer\b|\btaxi\b|\bdriver\b|\bchauffeur\b|\bshuttle\b|\bgettransfer\b/.test(text)) return "transfer";
   if (/\binsurance\b|\baxa\b|\ballianz\b/.test(text)) return "insurance";
+  if (item.raw || /\bflight\b|\bfly\b|\bairline\b|\bairways\b|\bticket\s*flight\b/.test(text)) return "flight";
+  if (/\bhotel\b|\bstay\b|\baccommodation\b|\blodging\b|\bzenhotels\b|\bratehawk\b|\bbooking\.com\b|\bbed\b/.test(text)) return "hotel";
   if (isKnownActivityProviderName(text) || /\btour\b|\bticket\b|\bexcursion\b|\bactivity\b|\bexperience\b|\battraction\b|\bmuseum\b/.test(text)) return "activity";
   return "other";
 }
@@ -857,10 +857,52 @@ function actionSourceForUrl(url = "", fallbackSource = "") {
   return fallbackSource || "provider_link";
 }
 
+function isUrlCompatibleWithCategory(category, rawUrl = "") {
+  const host = hostFromUrl(rawUrl);
+  if (!rawUrl) return false;
+  if (!host) return false;
+
+  if (category === "transfer") {
+    return host.includes("gettransfer") ||
+      (host.includes("google.com") && sanitizeText(rawUrl).includes("/maps/"));
+  }
+
+  if (category === "insurance") {
+    return host.includes("axa-schengen") ||
+      host.includes("allianz-travel") ||
+      host.includes("allianztravelinsurance");
+  }
+
+  if (category === "flight") {
+    return host.includes("skyscanner") ||
+      host.includes("amadeus") ||
+      host.includes("duffel");
+  }
+
+  return true;
+}
+
+function fallbackUrlForCategory(category, item = {}) {
+  if (category === "transfer") return "https://gettransfer.com";
+  if (category === "insurance") {
+    const provider = sanitizeText(item.provider).toLowerCase();
+    return provider.includes("allianz")
+      ? "https://www.allianz-travel.com"
+      : "https://www.axa-schengen.com";
+  }
+  if (category === "flight") return buildSkyscannerActionUrl(item);
+  return "";
+}
+
 async function ensureBookingActionForItem(item = {}, plan = {}, reqId = null) {
   const category = classifyCostItem(item);
   let url = sanitizeText(item.booking_url);
   let fallbackSource = "";
+
+  if (url && !isUrlCompatibleWithCategory(category, url)) {
+    logInfo(reqId || "n/a", "Replacing incompatible booking URL", category, url);
+    url = "";
+  }
 
   if (isWeakBookingUrl(url)) {
     if (category === "hotel") {
@@ -873,16 +915,13 @@ async function ensureBookingActionForItem(item = {}, plan = {}, reqId = null) {
       });
       fallbackSource = "zen_affiliate_fallback";
     } else if (category === "flight") {
-      url = buildSkyscannerActionUrl(item);
+      url = fallbackUrlForCategory(category, item);
       fallbackSource = "flight_search_fallback";
     } else if (category === "transfer") {
-      url = "https://gettransfer.com";
+      url = fallbackUrlForCategory(category, item);
       fallbackSource = "transfer_provider_fallback";
     } else if (category === "insurance") {
-      const provider = sanitizeText(item.provider).toLowerCase();
-      url = provider.includes("allianz")
-        ? "https://www.allianz-travel.com"
-        : "https://www.axa-schengen.com";
+      url = fallbackUrlForCategory(category, item);
       fallbackSource = "insurance_provider_fallback";
     } else if (category === "activity" && isKnownActivityProviderName(item.provider)) {
       url = activityProviderSearchUrl(
@@ -3395,8 +3434,20 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
             const lowerProv = (item.provider || "").toLowerCase();
             const lowerDetails = (item.details || "").toLowerCase();
             const isAirbnb = lowerProv.includes("airbnb");
+            const isTransferLike = lowerProv.includes("gettransfer") ||
+              lowerItem.includes("transfer") ||
+              lowerDetails.includes("transfer") ||
+              lowerItem.includes("taxi") ||
+              lowerDetails.includes("taxi") ||
+              lowerItem.includes("shuttle") ||
+              lowerDetails.includes("shuttle");
+            const isInsuranceLike = lowerItem.includes("insurance") ||
+              lowerProv.includes("axa") ||
+              lowerProv.includes("allianz");
             const isHotelLike =
               !isAirbnb &&
+              !isTransferLike &&
+              !isInsuranceLike &&
               (
                 lowerProv.includes("booking.com") ||
                 lowerProv.includes("zenhotels") ||
@@ -3412,6 +3463,20 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
             );
             const needsSpecificActivityLink =
               isWeakBookingUrl(item.booking_url);
+            const isActivityLike =
+              !isTransferLike &&
+              !isInsuranceLike &&
+              (
+                isKnownActivityProviderName(lowerProv) ||
+                lowerItem.includes("tour") ||
+                lowerItem.includes("ticket") ||
+                lowerItem.includes("excursion") ||
+                lowerItem.includes("activity") ||
+                lowerDetails.includes("tour") ||
+                lowerDetails.includes("ticket") ||
+                lowerDetails.includes("excursion") ||
+                lowerDetails.includes("activity")
+              );
 
             if (isHotelLike) {
               const matchedHotel = pickHotelFromMemory(item.provider || item.item, mem?.lastHotels || []);
@@ -3445,7 +3510,16 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
                 });
               }
             } else {
+              if (isTransferLike) {
+                item.booking_url = "https://gettransfer.com";
+              } else if (isInsuranceLike) {
+                item.booking_url = lowerProv.includes("allianz")
+                  ? "https://www.allianz-travel.com"
+                  : "https://www.axa-schengen.com";
+              }
+
               if (
+                isActivityLike &&
                 matchedActivity &&
                 needsSpecificActivityLink &&
                 matchedActivity.booking_url
@@ -3453,6 +3527,7 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
                 item.booking_url = matchedActivity.booking_url;
               }
               if (
+                isActivityLike &&
                 matchedActivity &&
                 (!item.provider || isKnownActivityProviderName(item.provider)) &&
                 matchedActivity.provider
@@ -3464,6 +3539,7 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
               }
 
               if (
+                isActivityLike &&
                 !item.booking_url &&
                 matchedActivity &&
                 (isKnownActivityProviderName(lowerProv) ||
