@@ -14,6 +14,7 @@ import {
   mergeFlightOffers,
   searchDuffelOffers,
 } from "./duffel.provider.js";
+import { guardPlan } from "./plan-guard.js";
 import { enrichTravelIntelligence } from "./travel-intelligence.js";
 
 dotenv.config();
@@ -3607,6 +3608,7 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
           });
 
           await applyBookingActions(plan, { reqId });
+          guardPlan(plan);
           plan.linkIntegrity = summarizeLinkIntegrity(plan);
           plan.providerConfidence = {
             ...(plan.providerConfidence || {}),
