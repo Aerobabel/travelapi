@@ -686,6 +686,10 @@ function isGenericProviderHomepage(rawUrl = "") {
     const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
     const segments = (parsed.pathname || "/").split("/").filter(Boolean);
 
+    if (host === "zenhotels.com") {
+      return segments.length === 0 || segments[0] === "hotels";
+    }
+
     if (host.includes("getyourguide")) {
       return (
         segments.length === 0 ||
@@ -793,6 +797,27 @@ function isZenAffiliateUrl(rawUrl = "") {
   }
 }
 
+function isZenHotelsSearchUrl(rawUrl = "") {
+  try {
+    const url = new URL(sanitizeText(rawUrl));
+    const host = url.hostname.replace(/^www\./i, "").toLowerCase();
+    const path = (url.pathname || "/").replace(/\/+$/, "") || "/";
+    return host === "zenhotels.com" && path === "/hotels";
+  } catch {
+    return false;
+  }
+}
+
+function isZenHotelsHotelPageUrl(rawUrl = "") {
+  try {
+    const url = new URL(sanitizeText(rawUrl));
+    const host = url.hostname.replace(/^www\./i, "").toLowerCase();
+    return host === "zenhotels.com" && /^\/hotel\//i.test(url.pathname || "");
+  } catch {
+    return false;
+  }
+}
+
 function buildSkyscannerActionUrl(item = {}) {
   const raw = item.raw || {};
   const origin = sanitizeText(raw.origin || raw.originCode || "").toLowerCase();
@@ -804,7 +829,11 @@ function buildSkyscannerActionUrl(item = {}) {
 
 function actionLabelForCategory(category, url = "") {
   const host = hostFromUrl(url);
-  if (category === "hotel") return host.includes("google") ? "View hotel" : "Book hotel";
+  if (category === "hotel") {
+    if (host.includes("google")) return "View hotel";
+    if (isZenHotelsSearchUrl(url)) return "Search hotels";
+    return "Book hotel";
+  }
   if (category === "flight") return "Find flight";
   if (category === "transfer") return "Book transfer";
   if (category === "insurance") return "Get insurance";
@@ -815,6 +844,9 @@ function actionLabelForCategory(category, url = "") {
 function actionSourceForUrl(url = "", fallbackSource = "") {
   const host = hostFromUrl(url);
   if (!host) return fallbackSource || "missing";
+  if (host === "zenhotels.com" && isZenHotelsSearchUrl(url)) {
+    return fallbackSource ? "zen_search_fallback" : "zen_search";
+  }
   if (isZenAffiliateUrl(url)) return "zen_affiliate";
   if (host.includes("skyscanner")) return "flight_search";
   if (host.includes("gettransfer")) return "transfer_provider";
@@ -869,11 +901,18 @@ async function ensureBookingActionForItem(item = {}, plan = {}, reqId = null) {
   if (url) item.booking_url = url;
 
   const source = actionSourceForUrl(url, fallbackSource);
+  const isHotelSearchFallback = category === "hotel" && isZenHotelsSearchUrl(url);
   const confidence =
     !url ? "none" :
+      isHotelSearchFallback ? "medium" :
       source === "zen_affiliate" || source === "provider_link" || source === "activity_provider" ? "high" :
         source.includes("fallback") || source === "activity_provider_search" ? "medium" :
           "low";
+  const verifiedDirectUrl =
+    Boolean(url) &&
+    !isWeakBookingUrl(url) &&
+    confidence !== "low" &&
+    !(category === "hotel" && isHotelSearchFallback);
 
   item.bookingAction = {
     type: category,
@@ -883,7 +922,8 @@ async function ensureBookingActionForItem(item = {}, plan = {}, reqId = null) {
     confidence,
     referralApplied: category === "hotel" && isZenAffiliateUrl(url),
     actionable: Boolean(url),
-    verified: Boolean(url) && !isWeakBookingUrl(url) && confidence !== "low",
+    verified: verifiedDirectUrl,
+    exactProperty: category === "hotel" ? isZenHotelsHotelPageUrl(url) : undefined,
   };
   return item.bookingAction;
 }
@@ -1818,10 +1858,10 @@ async function createAffiliateLink({
   let resolvedRegionId = regionId ? String(regionId) : null;
   let resolvedHotelUrl = null;
 
-  if (!resolvedHotelId && !resolvedRegionId) {
+  if (!resolvedHotelUrl && (hotelName || city)) {
     const resolved = await resolveZenIds({ hotelName, city, reqId });
-    resolvedHotelId = resolved.hotelId;
-    resolvedRegionId = resolved.regionId;
+    if (!resolvedHotelId) resolvedHotelId = resolved.hotelId;
+    if (!resolvedRegionId) resolvedRegionId = resolved.regionId;
     resolvedHotelUrl = normalizeZenHotelPageUrl(resolved.hotelUrl);
   }
 
@@ -2477,6 +2517,8 @@ Your goal:
 - Use **real hotels**:
   - Real property names, approximate nightly rates, and ratings. 
   - If live hotel availability returns zero, use the verified Google Places fallback hotels from \`search_hotels\` with estimated prices. Do not loop on hotel availability or ask the user to pick workaround A/B/C unless they specifically ask.
+  - If the user asks to choose, change, or swap the selected hotel but has not named a property, neighborhood, landmark, or exact area, ask one concise clarification about preferred area or constraints before finalizing the hotel.
+  - Do not describe a provider search-results URL as a direct hotel booking. Only exact property URLs can be treated as "Book hotel"; search-result URLs must be presented as hotel search/compare links.
   - Respect budget preference:
     - "saving/budget" -> prioritize lowest-priced available options.
     - "comfort" -> prioritize high-rated options (still with realistic prices).
@@ -3397,7 +3439,8 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
                   checkIn: hotelCheckIn,
                   checkOut: hotelCheckOut,
                   guests: zenGuestsForPlan,
-                  hotelId: matchedHotel?.hotelId || null,
+                  hotelId: matchedHotel?.hid || matchedHotel?.hotelId || null,
+                  regionId: matchedHotel?.regionId || null,
                   reqId,
                 });
               }
