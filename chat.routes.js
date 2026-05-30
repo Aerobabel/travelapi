@@ -14,6 +14,7 @@ import {
   mergeFlightOffers,
   searchDuffelOffers,
 } from "./duffel.provider.js";
+import { verifyPlanLinks } from "./link-verifier.js";
 import { guardPlan } from "./plan-guard.js";
 import { enrichTravelIntelligence } from "./travel-intelligence.js";
 
@@ -3609,11 +3610,13 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
 
           await applyBookingActions(plan, { reqId });
           guardPlan(plan);
+          await verifyPlanLinks(plan, { reqId });
           plan.linkIntegrity = summarizeLinkIntegrity(plan);
           plan.providerConfidence = {
             ...(plan.providerConfidence || {}),
             linkIntegrity: plan.linkIntegrity,
             bookingActions: plan.bookingActionSummary,
+            linkVerification: plan.linkVerification,
           };
 
           persistMemory();
