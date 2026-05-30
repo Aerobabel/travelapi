@@ -49,6 +49,24 @@ function item(label, provider, url, type) {
 }
 
 {
+  const fetchImpl = makeFetch({
+    "HEAD https://www.zenhotels.com/hotel/nigeria/abuja/missing_property/": { status: 200 },
+    "GET https://www.zenhotels.com/hotel/nigeria/abuja/missing_property/": {
+      status: 200,
+      body: "<html><h1>Looks like this page doesn't exist</h1></html>",
+    },
+  });
+
+  const result = await verifyUrl(
+    "https://www.zenhotels.com/hotel/nigeria/abuja/missing_property/",
+    { fetchImpl, cache: false }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "soft_not_found");
+}
+
+{
   const calls = [];
   const fetchImpl = makeFetch({
     "HEAD https://www.zenhotels.com/hotel/nigeria/abuja/broken": { status: 404 },
@@ -74,6 +92,7 @@ function item(label, provider, url, type) {
   assert.equal(action.exactProperty, false);
   assert.match(action.url, /^https:\/\/www\.zenhotels\.com\/hotels\/\?/);
   assert.ok(calls.includes("GET https://www.zenhotels.com/hotels/"));
+  assert.equal(calls.includes("GET https://www.zenhotels.com/hotel/nigeria/abuja/broken"), false);
 }
 
 {

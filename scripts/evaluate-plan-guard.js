@@ -71,7 +71,7 @@ const plan = guardPlan({
   ],
 });
 
-const [transfer, insurance, hotelSearch, hotelExact, activity] = plan.costBreakdown;
+const [transfer, insurance, hotelSearch, hotelExactFallback, activity] = plan.costBreakdown;
 
 assert.equal(classifyBookingItem(transfer), "transfer");
 assert.equal(transfer.bookingAction.type, "transfer");
@@ -90,11 +90,13 @@ assert.equal(isZenHotelsSearchUrl(hotelSearch.bookingAction.url), true);
 assert.equal(hotelSearch.bookingAction.exactProperty, false);
 assert.equal(hotelSearch.bookingAction.verified, false);
 
-assert.equal(hotelExact.bookingAction.type, "hotel");
-assert.equal(hotelExact.bookingAction.label, "Book hotel");
-assert.equal(isZenHotelsHotelPageUrl(hotelExact.bookingAction.url), true);
-assert.equal(hotelExact.bookingAction.exactProperty, true);
-assert.equal(hotelExact.bookingAction.verified, true);
+assert.equal(hotelExactFallback.bookingAction.type, "hotel");
+assert.equal(hotelExactFallback.bookingAction.label, "Search hotels");
+assert.equal(isZenHotelsHotelPageUrl(hotelExactFallback.bookingAction.url), false);
+assert.equal(isZenHotelsSearchUrl(hotelExactFallback.bookingAction.url), true);
+assert.equal(hotelExactFallback.bookingAction.exactProperty, false);
+assert.equal(hotelExactFallback.bookingAction.verified, false);
+assert.equal(hotelExactFallback.bookingAction.corrected, true);
 
 assert.equal(activity.bookingAction.type, "activity");
 assert.equal(activity.bookingAction.url, "https://www.airbnb.com/experiences/123456");

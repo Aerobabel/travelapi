@@ -16,7 +16,7 @@ import {
 } from "./duffel.provider.js";
 import { verifyPlanLinks } from "./link-verifier.js";
 import { appendPipelineTrace, runParallelSteps } from "./parallel-orchestrator.js";
-import { guardPlan } from "./plan-guard.js";
+import { guardPlan, shouldUseZenExactPropertyLinks } from "./plan-guard.js";
 import { enrichTravelIntelligence } from "./travel-intelligence.js";
 
 dotenv.config();
@@ -1902,6 +1902,17 @@ async function createAffiliateLink({
     partnerExtra,
   });
 
+  const nameAndCityQuery = [sanitizeText(hotelName), sanitizeText(city)]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  if (!shouldUseZenExactPropertyLinks()) {
+    if (nameAndCityQuery) return buildZenSearchUrl(nameAndCityQuery, params);
+    if (regionId) return buildZenSerpUrl(regionId, params);
+    return buildZenSearchUrl(sanitizeText(city), params);
+  }
+
   let resolvedHotelId = hotelId ? String(hotelId) : null;
   let resolvedRegionId = regionId ? String(regionId) : null;
   let resolvedHotelUrl = null;
@@ -1921,10 +1932,6 @@ async function createAffiliateLink({
   const resolvedBySearch = await resolveZenHotelPageViaSerp({ hotelName, city, reqId });
   if (resolvedBySearch) return appendQueryParams(resolvedBySearch, params);
 
-  const nameAndCityQuery = [sanitizeText(hotelName), sanitizeText(city)]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
   if (nameAndCityQuery) return buildZenSearchUrl(nameAndCityQuery, params);
 
   if (resolvedRegionId) return buildZenSerpUrl(resolvedRegionId, params);

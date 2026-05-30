@@ -8,6 +8,7 @@ import {
   isUrlCompatibleWithCategory,
   isZenHotelsHotelPageUrl,
   isZenHotelsSearchUrl,
+  shouldUseZenExactPropertyLinks,
   sourceForUrl,
   urlParts,
 } from "./plan-guard.js";
@@ -23,6 +24,8 @@ const verificationCache = new Map();
 
 const NOT_FOUND_PATTERNS = [
   /\b(page|content|listing|offer|hotel|activity|experience)\s+(not\s+found|not\s+available|does\s+not\s+exist|doesn't\s+exist)\b/i,
+  /\b(page|content|listing|offer|hotel|activity|experience)\s+(doesnt|doesn.t)\s+exist\b/i,
+  /\blooks\s+like\b.{0,120}\b(page|content|listing|offer|hotel|activity|experience)\b.{0,120}\b(does\s+not|doesn't|doesnt|doesn.t)\s+exist\b/i,
   /\b(this|that)\s+(page|listing|offer|hotel|activity|experience)\s+(is\s+)?(unavailable|no\s+longer\s+available|missing)\b/i,
   /\b404\b.{0,80}\b(not\s+found|page\s+not\s+found|error)\b/i,
   /\b(page\s+not\s+found|not\s+found\s+404|error\s+404)\b/i,
@@ -299,7 +302,10 @@ function verificationSummary(result = {}) {
 
 function directVerifiedForCategory(category, rawUrl = "", verification = {}) {
   if (!verification.ok) return false;
-  if (category === "hotel") return isZenHotelsHotelPageUrl(rawUrl) || isGoogleMapsUrl(rawUrl);
+  if (category === "hotel") {
+    if (isZenHotelsHotelPageUrl(rawUrl) && !shouldUseZenExactPropertyLinks()) return false;
+    return isZenHotelsHotelPageUrl(rawUrl) || isGoogleMapsUrl(rawUrl);
+  }
   if (category === "activity") return !isGenericProviderUrl(rawUrl);
   return !isGenericProviderUrl(rawUrl);
 }
@@ -445,6 +451,38 @@ async function verifyCostItem(item, index, plan, options) {
       originalUrl,
       finalUrl: "",
       issue: "category_mismatch",
+    };
+  }
+
+  if (category === "hotel" && isZenHotelsHotelPageUrl(originalUrl) && !shouldUseZenExactPropertyLinks()) {
+    const fallback = fallbackUrlForCategory(category, item, plan);
+    if (fallback && fallback !== originalUrl && isUrlCompatibleWithCategory(category, fallback)) {
+      const fallbackVerification = await verifyUrl(fallback, options);
+      if (fallbackVerification.ok) {
+        applyUrlToItem(item, category, fallback, fallbackVerification, {
+          corrected: true,
+          source: "zen_search_verified_fallback",
+        });
+        return {
+          path,
+          category,
+          status: "replaced",
+          originalUrl,
+          finalUrl: fallback,
+          issue: "zen_exact_property_disabled",
+          fallbackVerification: verificationSummary(fallbackVerification),
+        };
+      }
+    }
+
+    clearItemUrl(item, category, { reason: "zen_exact_property_disabled", checkedAt: nowIso() });
+    return {
+      path,
+      category,
+      status: "cleared",
+      originalUrl,
+      finalUrl: "",
+      issue: "zen_exact_property_disabled",
     };
   }
 

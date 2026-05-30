@@ -8,6 +8,7 @@ const ZEN_UTM_TERM = process.env.ZEN_UTM_TERM || "None";
 const ZEN_LANG = process.env.ZEN_LANG || "en";
 const ZEN_CURRENCY = process.env.ZEN_CURRENCY || "USD";
 const ZEN_PARTNER_EXTRA = process.env.ZEN_PARTNER_EXTRA || "None";
+const ZEN_EXACT_PROPERTY_LINKS_ENABLED = process.env.ZEN_EXACT_PROPERTY_LINKS_ENABLED === "true";
 
 const ACTIVITY_PROVIDER_HOSTS = [
   "getyourguide.com",
@@ -100,6 +101,10 @@ export function isZenHotelsSearchUrl(rawUrl = "") {
 export function isZenHotelsHotelPageUrl(rawUrl = "") {
   const { host, path } = urlParts(rawUrl);
   return host === "zenhotels.com" && (path === "/hotel" || path.startsWith("/hotel/"));
+}
+
+export function shouldUseZenExactPropertyLinks() {
+  return ZEN_EXACT_PROPERTY_LINKS_ENABLED;
 }
 
 export function isGoogleMapsUrl(rawUrl = "") {
@@ -316,6 +321,18 @@ export function guardBookingItem(item = {}, { plan = {}, path = "costBreakdown[]
       "booking_url_category_mismatch",
       "error",
       `Replaced ${category} booking URL because it pointed to an incompatible provider.`,
+      path,
+      { originalUrl, category }
+    ));
+    url = "";
+    corrected = true;
+  }
+
+  if (url && category === "hotel" && isZenHotelsHotelPageUrl(url) && !shouldUseZenExactPropertyLinks()) {
+    issues.push(issue(
+      "zen_exact_property_disabled",
+      "warning",
+      "Replaced ZenHotels exact-property URL with a dated hotel search because exact pages can show missing-page errors.",
       path,
       { originalUrl, category }
     ));
