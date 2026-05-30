@@ -15,6 +15,7 @@ import {
   searchDuffelOffers,
 } from "./duffel.provider.js";
 import { verifyPlanLinks } from "./link-verifier.js";
+import { appendPipelineTrace, runParallelSteps } from "./parallel-orchestrator.js";
 import { guardPlan } from "./plan-guard.js";
 import { enrichTravelIntelligence } from "./travel-intelligence.js";
 
@@ -971,9 +972,15 @@ async function ensureBookingActionForItem(item = {}, plan = {}, reqId = null) {
 
 async function applyBookingActions(plan = {}, { reqId = null } = {}) {
   const items = Array.isArray(plan.costBreakdown) ? plan.costBreakdown : [];
-  for (const item of items) {
-    await ensureBookingActionForItem(item, plan, reqId);
-  }
+  await Promise.all(
+    items.map(async (item) => {
+      try {
+        await ensureBookingActionForItem(item, plan, reqId);
+      } catch (error) {
+        logError(reqId || "n/a", "Booking action enrichment failed", error?.message || error);
+      }
+    })
+  );
 
   const actions = items.map((item) => item.bookingAction).filter(Boolean);
   const confidence = actions.reduce((acc, action) => {
@@ -2983,7 +2990,8 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
             let duffelOffers = [];
             const providerNotes = [];
 
-            try {
+            const [amadeusResult, duffelResult] = await Promise.allSettled([
+              (async () => {
               const response = await amadeus.shopping.flightOffersSearch.post(JSON.stringify({
                 currencyCode: FLIGHT_CURRENCY_CODE,
                 originDestinations,
@@ -3002,24 +3010,31 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
               }));
               const data = response.data;
               const dictionaries = response.result?.dictionaries || {};
-              amadeusOffers = (data || []).map(o => normalizeOffer(o, dictionaries));
-            } catch (e) {
-              providerNotes.push(`Amadeus failed: ${e?.response?.result?.errors?.[0]?.detail || e.message}`);
-              logError(reqId, "Amadeus Flight Error", e);
-            }
-
-            try {
-              const duffelResult = await searchDuffelOffers({
+                return (data || []).map(o => normalizeOffer(o, dictionaries));
+              })(),
+              searchDuffelOffers({
                 originDestinations,
                 passengers: passengerCounts,
                 travelClass: "ECONOMY",
-              });
-              duffelOffers = duffelResult?.offers || [];
-            } catch (e) {
+              }),
+            ]);
+
+            if (amadeusResult.status === "fulfilled") {
+              amadeusOffers = amadeusResult.value || [];
+            } else {
+              const e = amadeusResult.reason;
+              providerNotes.push(`Amadeus failed: ${e?.response?.result?.errors?.[0]?.detail || e?.message || "unknown error"}`);
+              logError(reqId, "Amadeus Flight Error", e);
+            }
+
+            if (duffelResult.status === "fulfilled") {
+              duffelOffers = duffelResult.value?.offers || [];
+            } else {
+              const e = duffelResult.reason;
               if (e?.code === "DUFFEL_MISSING_TOKEN") {
                 providerNotes.push("Duffel skipped: access token is not configured.");
               } else {
-                providerNotes.push(`Duffel failed: ${e.message}`);
+                providerNotes.push(`Duffel failed: ${e?.message || "unknown error"}`);
                 logError(reqId, "Duffel Flight Error", e);
               }
             }
@@ -3267,12 +3282,12 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
 
           ensureWeather(plan);
 
-          try {
-            const q = plan.multiCity && plan.cities.length > 0 ? plan.cities[0] : plan.location;
-            plan.image = await pickPhoto(q || "travel", reqId);
-          } catch (e) {
-            plan.image = FALLBACK_IMAGE_URL;
-          }
+          const imageQuery = plan.multiCity && plan.cities.length > 0 ? plan.cities[0] : plan.location;
+          const imagePromise = pickPhoto(imageQuery || "travel", reqId)
+            .catch((error) => {
+              logError(reqId, "Plan image lookup failed", error?.message || error);
+              return FALLBACK_IMAGE_URL;
+            });
 
           // --- ENRICH FLIGHTS FROM MEMORY ---
           if (plan.flights && plan.flights.length > 0 && mem.lastFlights && mem.lastFlights.length > 0) {
@@ -3431,7 +3446,13 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
           const hotelCheckIn = sanitizeText(hotelContext.checkIn) || tripStart;
           const hotelCheckOut = sanitizeText(hotelContext.checkOut) || tripEnd;
           const zenGuestsForPlan = deriveZenGuestsFromProfile(mem?.profile);
-          for (const item of plan.costBreakdown) {
+          const costItemRun = await runParallelSteps(
+            plan.costBreakdown.map((item, index) => ({
+              name: `cost_item_${index + 1}`,
+              metadata: {
+                item: sanitizeText(item.item || item.provider || `item ${index + 1}`).slice(0, 80),
+              },
+              run: async () => {
             const lowerItem = (item.item || "").toLowerCase();
             const lowerProv = (item.provider || "").toLowerCase();
             const lowerDetails = (item.details || "").toLowerCase();
@@ -3585,38 +3606,98 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
             if (item.booking_url) { try { domain = new URL(item.booking_url).hostname.replace('www.', ''); } catch (e) { } }
             if (!domain && item.provider) { /* simplify */ domain = item.provider.replace(/\s/g, '').toLowerCase() + ".com"; }
             if (domain) { item.iconType = 'image'; item.iconValue = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`; }
-          }
+              },
+            })),
+            {
+              concurrency: Number(process.env.PLANNER_COST_ITEM_CONCURRENCY || 6),
+              logger: {
+                warn: (...args) => logError(reqId, ...args),
+              },
+            }
+          );
+          appendPipelineTrace(plan, "cost_item_enrichment", costItemRun.trace);
+          plan.image = await imagePromise;
 
           // Recalculate Total
           if (plan.costBreakdown.length > 0) {
             plan.price = plan.costBreakdown.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
           }
 
-          await enrichPlanV2(plan, {
-            mapsProvider,
-            memories: {
-              activities: mem?.lastActivities || [],
-              restaurants: mem?.lastRestaurants || [],
-              hotels: mem?.lastHotels || [],
+          emitStatus({
+            sessionMode: SESSION_MODE.PLANNING_TRIP,
+            stage: "enriching_plan",
+            message: "Checking maps, weather, booking links, and provider data...",
+          });
+
+          const mapRun = await runParallelSteps([
+            {
+              name: "map_place_route_enrichment",
+              run: () => enrichPlanV2(plan, {
+                mapsProvider,
+                memories: {
+                  activities: mem?.lastActivities || [],
+                  restaurants: mem?.lastRestaurants || [],
+                  hotels: mem?.lastHotels || [],
+                },
+                logger: {
+                  warn: (...args) => logError(reqId, ...args),
+                },
+              }),
             },
+          ], {
+            concurrency: 1,
             logger: {
               warn: (...args) => logError(reqId, ...args),
             },
           });
+          appendPipelineTrace(plan, "map_enrichment", mapRun.trace);
 
-          await enrichTravelIntelligence(plan, {
-            profile: mem.profile,
+          const providerRun = await runParallelSteps([
+            {
+              name: "travel_intelligence",
+              run: () => enrichTravelIntelligence(plan, {
+                profile: mem.profile,
+              }),
+            },
+            {
+              name: "booking_actions",
+              run: () => applyBookingActions(plan, { reqId }),
+            },
+          ], {
+            concurrency: 2,
+            logger: {
+              warn: (...args) => logError(reqId, ...args),
+            },
           });
+          appendPipelineTrace(plan, "provider_enrichment", providerRun.trace);
 
-          await applyBookingActions(plan, { reqId });
           guardPlan(plan);
-          await verifyPlanLinks(plan, { reqId });
+
+          const verificationRun = await runParallelSteps([
+            {
+              name: "live_link_verification",
+              run: () => verifyPlanLinks(plan, { reqId }),
+            },
+          ], {
+            concurrency: 1,
+            logger: {
+              warn: (...args) => logError(reqId, ...args),
+            },
+          });
+          appendPipelineTrace(plan, "link_verification", verificationRun.trace);
+          if (!plan.linkVerification) {
+            plan.linkVerification = {
+              enabled: false,
+              warnings: ["Live link verification failed before producing a report."],
+            };
+          }
           plan.linkIntegrity = summarizeLinkIntegrity(plan);
           plan.providerConfidence = {
             ...(plan.providerConfidence || {}),
             linkIntegrity: plan.linkIntegrity,
             bookingActions: plan.bookingActionSummary,
             linkVerification: plan.linkVerification,
+            orchestration: plan.orchestration,
           };
 
           persistMemory();

@@ -29,6 +29,21 @@ const CITY_CENTERS = {
 };
 
 const clean = (value) => String(value || "").trim();
+const DAY_ENRICHMENT_CONCURRENCY = Number(process.env.PLAN_DAY_ENRICHMENT_CONCURRENCY || 3);
+
+async function mapLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 const normalizeText = (value = "") =>
   clean(value)
@@ -499,17 +514,19 @@ async function enrichEventCoordinates(event, { plan, mapsProvider, memoryPlaces,
 
 async function buildRouteLegs(day, mapsProvider) {
   const events = (day.events || []).filter(isGroundRouteEvent);
-  const legs = [];
-  for (let i = 1; i < events.length; i += 1) {
-    const from = events[i - 1];
-    const to = events[i];
+  const legs = await Promise.all(events.slice(1).map(async (to, index) => {
+    const from = events[index];
     const mode = chooseRouteMode(from, to);
-    const providerLeg =
-      (await mapsProvider?.routeLeg?.({ from, to, mode })) ||
-      estimateRouteLeg({ from, to, mode });
+    let providerLeg = null;
+    try {
+      providerLeg = await mapsProvider?.routeLeg?.({ from, to, mode });
+    } catch {
+      providerLeg = null;
+    }
+    providerLeg = providerLeg || estimateRouteLeg({ from, to, mode });
 
-    legs.push({
-      id: `${from.id || `e${i}`}-to-${to.id || `e${i + 1}`}`,
+    return {
+      id: `${from.id || `e${index + 1}`}-to-${to.id || `e${index + 2}`}`,
       fromEventId: from.id,
       toEventId: to.id,
       mode: providerLeg.mode || mode,
@@ -521,8 +538,8 @@ async function buildRouteLegs(day, mapsProvider) {
       geometry: providerLeg.geometry || null,
       encodedPolyline: providerLeg.encodedPolyline || null,
       confidence: providerLeg.confidence || "estimated",
-    });
-  }
+    };
+  }));
   return legs;
 }
 
@@ -598,8 +615,7 @@ export async function enrichPlanV2(plan, { mapsProvider, memories = {}, logger =
     hasProviderPlacePhotos: Boolean(mapsProvider?.hasPlacePhotos),
   };
 
-  for (let dayIndex = 0; dayIndex < days.length; dayIndex += 1) {
-    const day = days[dayIndex];
+  await mapLimit(days, DAY_ENRICHMENT_CONCURRENCY, async (day, dayIndex) => {
     day.id = day.id || `day-${dayIndex + 1}`;
     day.isoDate = day.isoDate || (/^\d{4}-\d{2}-\d{2}/.test(clean(day.date)) ? clean(day.date).slice(0, 10) : undefined);
     day.events = Array.isArray(day.events) ? day.events : [];
@@ -643,7 +659,7 @@ export async function enrichPlanV2(plan, { mapsProvider, memories = {}, logger =
         optimizedMeters > 0 &&
         currentMeters - optimizedMeters >= 1500,
     };
-  }
+  });
 
   const allEvents = days.flatMap((day) => day.events || []);
   plan.mapBounds = calcBounds(allEvents);
