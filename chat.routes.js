@@ -1894,6 +1894,7 @@ async function createAffiliateLink({
   regionId = null,
   partnerExtra = ZEN_PARTNER_EXTRA,
   reqId = null,
+  allowSearchFallback = true,
 } = {}) {
   const params = buildZenParams({
     checkIn,
@@ -1908,6 +1909,7 @@ async function createAffiliateLink({
     .trim();
 
   if (!shouldUseZenExactPropertyLinks()) {
+    if (!allowSearchFallback) return null;
     if (nameAndCityQuery) return buildZenSearchUrl(nameAndCityQuery, params);
     if (regionId) return buildZenSerpUrl(regionId, params);
     return buildZenSearchUrl(sanitizeText(city), params);
@@ -1932,12 +1934,46 @@ async function createAffiliateLink({
   const resolvedBySearch = await resolveZenHotelPageViaSerp({ hotelName, city, reqId });
   if (resolvedBySearch) return appendQueryParams(resolvedBySearch, params);
 
+  if (!allowSearchFallback) return null;
   if (nameAndCityQuery) return buildZenSearchUrl(nameAndCityQuery, params);
 
   if (resolvedRegionId) return buildZenSerpUrl(resolvedRegionId, params);
 
   // Fallback keeps attribution even if destination lookup fails.
   return buildZenSearchUrl(sanitizeText(city), params);
+}
+
+function buildHotelBookingAction({
+  item = {},
+  matchedHotel = null,
+  url = "",
+  city = "",
+  checkIn = "",
+  checkOut = "",
+  guests = "",
+} = {}) {
+  const hotelName = sanitizeText(matchedHotel?.name || item?.provider || item?.item || "Hotel");
+  const exactUrl = sanitizeText(url);
+  return {
+    type: "hotel",
+    category: "hotel",
+    label: exactUrl ? "Book hotel" : "Search hotels",
+    url: exactUrl,
+    verified: Boolean(exactUrl),
+    provider: matchedHotel?.source === "google_places_fallback" ? "google_places" : "ratehawk_zen",
+    hotelName,
+    hotelId: matchedHotel?.hotelId || null,
+    hid: matchedHotel?.hid || null,
+    legacyId: matchedHotel?.legacyId || null,
+    regionId: matchedHotel?.regionId || null,
+    city: sanitizeText(matchedHotel?.city || city),
+    checkIn: sanitizeText(matchedHotel?.checkIn || checkIn),
+    checkOut: sanitizeText(matchedHotel?.checkOut || checkOut),
+    guests: sanitizeText(guests),
+    reason: exactUrl
+      ? "Verified exact hotel page."
+      : "Exact hotel page was not verified; open hotel search with this recommendation preselected.",
+  };
 }
 
 // --- 3. SERPAPI SEARCH LAYER -----------------------------------------------
@@ -3205,10 +3241,14 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
                         hotelId: h.hid || h.hotelId || null,
                         regionId: h.regionId || regionId,
                         reqId,
+                        allowSearchFallback: false,
                       });
                       const ratingPart = h.rating > 0 ? `, rating ${h.rating}` : "";
                       const idPart = h.hid ? `hid:${h.hid}` : h.hotelId;
-                      return `Hotel ${h.name} (${idPart}): from $${h.total.toFixed(2)} total for ${checkIn} to ${checkOut}${ratingPart}. Book here: ${affLink}`;
+                      const linkPart = affLink
+                        ? `Exact hotel page: ${affLink}`
+                        : "Exact hotel page unavailable; use the selected hotel name/id for in-app hotel search.";
+                      return `Hotel ${h.name} (${idPart}): from $${h.total.toFixed(2)} total for ${checkIn} to ${checkOut}${ratingPart}. ${linkPart}`;
                     })
                   );
 
@@ -3537,8 +3577,19 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
                   hotelId: matchedHotel?.hid || matchedHotel?.hotelId || null,
                   regionId: matchedHotel?.regionId || null,
                   reqId,
+                  allowSearchFallback: false,
                 });
               }
+              item.bookingAction = buildHotelBookingAction({
+                item,
+                matchedHotel,
+                url: item.booking_url,
+                city: hotelContext.city || plan.location,
+                checkIn: hotelCheckIn,
+                checkOut: hotelCheckOut,
+                guests: zenGuestsForPlan,
+              });
+              item.booking_action = item.bookingAction;
             } else {
               if (isTransferLike) {
                 item.booking_url = "https://gettransfer.com";

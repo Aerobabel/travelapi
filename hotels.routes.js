@@ -77,6 +77,53 @@ const nightsBetween = (a, b) => {
   return Math.max(0, Math.round((B - A) / 86400000));
 };
 
+const normalizeHotelName = (value = "") =>
+  String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const scoreHotelNameMatch = (expectedName = "", candidateName = "") => {
+  const expected = normalizeHotelName(expectedName);
+  const candidate = normalizeHotelName(candidateName);
+  if (!expected || !candidate) return 0;
+  if (expected === candidate) return 1;
+  if (expected.includes(candidate) || candidate.includes(expected)) {
+    return 0.7 + (Math.min(expected.length, candidate.length) / Math.max(expected.length, candidate.length)) * 0.2;
+  }
+
+  const expectedTokens = new Set(expected.split(" ").filter(Boolean));
+  const candidateTokens = new Set(candidate.split(" ").filter(Boolean));
+  if (!expectedTokens.size || !candidateTokens.size) return 0;
+
+  let overlap = 0;
+  for (const token of expectedTokens) {
+    if (candidateTokens.has(token)) overlap += 1;
+  }
+  return overlap / Math.max(expectedTokens.size, candidateTokens.size);
+};
+
+const prioritizePreferredHotel = (hotels = [], preferredHotelName = "", preferredHotelId = "") => {
+  const name = String(preferredHotelName || "").trim();
+  const id = String(preferredHotelId || "").trim();
+  if (!name && !id) return hotels;
+
+  return hotels
+    .map((hotel) => {
+      const idMatch = id && String(hotel.id || "") === id;
+      const nameScore = name ? scoreHotelNameMatch(name, hotel.title || "") : 0;
+      const score = idMatch ? 1 : nameScore;
+      return {
+        ...hotel,
+        recommendedMatch: score >= 0.55,
+        _recommendedScore: score,
+      };
+    })
+    .sort((a, b) => (b._recommendedScore || 0) - (a._recommendedScore || 0))
+    .map(({ _recommendedScore, ...hotel }) => hotel);
+};
+
 const fallbackImg = (seed = "hotel") =>
   `https://images.unsplash.com/photo-1551776235-dde6d4829808?q=80&w=1200&auto=format&fit=crop&sig=${encodeURIComponent(
     seed
@@ -351,7 +398,14 @@ router.get("/showcase", async (_req, res) => {
 
 // Hotels search (chunked + Unsplash)
 router.get("/hotels", async (req, res) => {
-  const { destination = "", checkIn, checkOut, sort = "Recommended" } = req.query;
+  const {
+    destination = "",
+    checkIn,
+    checkOut,
+    sort = "Recommended",
+    preferredHotelName = "",
+    preferredHotelId = "",
+  } = req.query;
 
   try {
     const cityCode =
@@ -411,6 +465,8 @@ router.get("/hotels", async (req, res) => {
       default:
         break;
     }
+
+    hotels = prioritizePreferredHotel(hotels, preferredHotelName, preferredHotelId);
 
     // Verify currency/price in logs
     if (hotels.length > 0) {
