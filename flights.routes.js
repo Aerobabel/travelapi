@@ -8,6 +8,8 @@ import {
 } from './duffel.provider.js';
 
 const router = express.Router();
+const PRICE_HISTORY_LIMIT = 600;
+const flightPriceHistory = [];
 
 // Amadeus client (uses sandbox by default; set AMADEUS_HOSTNAME=production for live)
 const amadeus = new Amadeus({
@@ -28,6 +30,134 @@ const getCode = (label) => {
   if (/^[A-Za-z]{3}$/i.test(last)) return last.toUpperCase();
   if (/^[A-Za-z]{3}$/i.test(s)) return s.toUpperCase();
   return null;
+};
+
+const toPriceNumber = (value) => {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+};
+
+const getDaysUntil = (dateStr) => {
+  if (!dateStr) return null;
+  const date = new Date(`${String(dateStr).slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  return Math.ceil((date - today) / 86400000);
+};
+
+const buildPriceHistoryKey = (originDestinations = [], currencyCode = 'USD') => {
+  const route = originDestinations
+    .map((leg) => [
+      leg.originLocationCode,
+      leg.destinationLocationCode,
+      leg.departureDateTimeRange?.date,
+    ].filter(Boolean).join('-'))
+    .filter(Boolean)
+    .join('|');
+  return `${String(currencyCode || 'USD').toUpperCase()}::${route}`;
+};
+
+const percentileForPrice = (values = [], price) => {
+  const clean = values
+    .map(toPriceNumber)
+    .filter((value) => value !== null)
+    .sort((a, b) => a - b);
+  const amount = toPriceNumber(price);
+  if (!amount || clean.length < 2) return 50;
+  const firstAtOrAbove = clean.findIndex((value) => value >= amount);
+  const rank = firstAtOrAbove === -1 ? clean.length - 1 : firstAtOrAbove;
+  return Math.max(0, Math.min(100, Math.round((rank / (clean.length - 1)) * 100)));
+};
+
+const medianPrice = (values = []) => {
+  const clean = values
+    .map(toPriceNumber)
+    .filter((value) => value !== null)
+    .sort((a, b) => a - b);
+  if (!clean.length) return null;
+  const mid = Math.floor(clean.length / 2);
+  return clean.length % 2 ? clean[mid] : (clean[mid - 1] + clean[mid]) / 2;
+};
+
+const computePriceSignal = ({ key, originDestinations, offer, comparisonPrices }) => {
+  const price = toPriceNumber(offer?.price);
+  if (!price) return null;
+
+  const historyPrices = flightPriceHistory
+    .filter((row) => row.key === key)
+    .map((row) => row.price);
+  const prices = [...historyPrices, ...comparisonPrices].filter((value) => toPriceNumber(value) !== null);
+  const index = percentileForPrice(prices, price);
+  const daysUntil = getDaysUntil(originDestinations?.[0]?.departureDateTimeRange?.date);
+  const min = Math.min(...prices, price);
+  const max = Math.max(...prices, price);
+  const median = medianPrice(prices) || price;
+
+  let action = 'WATCH';
+  let actionLabel = 'Watch';
+  let reason = 'Comparable with current route prices';
+  if (daysUntil !== null && daysUntil <= 10) {
+    action = 'BUY';
+    actionLabel = 'Buy now';
+    reason = 'Trip is close, repricing risk is higher';
+  } else if (index <= 30) {
+    action = 'BUY';
+    actionLabel = 'Buy now';
+    reason = 'Price is in the cheap range for this search';
+  } else if (index >= 75 && (daysUntil === null || daysUntil > 21)) {
+    action = 'WAIT';
+    actionLabel = 'Wait';
+    reason = 'Price is high and dates are not urgent';
+  }
+
+  const label = index <= 30 ? 'Cheap' : index >= 70 ? 'High' : 'Fair';
+  const confidence = prices.length >= 12 ? 'high' : prices.length >= 5 ? 'medium' : 'low';
+
+  return {
+    index,
+    label,
+    action,
+    actionLabel,
+    confidence,
+    reason,
+    sampleCount: prices.length,
+    historyCount: historyPrices.length,
+    daysUntil,
+    min,
+    median: Math.round(median * 100) / 100,
+    max,
+  };
+};
+
+const enrichOffersWithPriceSignals = (offers = [], originDestinations = [], currencyCode = 'USD') => {
+  const key = buildPriceHistoryKey(originDestinations, currencyCode);
+  const comparisonPrices = offers.map((offer) => offer.price);
+  return offers.map((offer) => ({
+    ...offer,
+    priceSignal: computePriceSignal({ key, originDestinations, offer, comparisonPrices }),
+  }));
+};
+
+const rememberFlightPrices = (offers = [], originDestinations = [], currencyCode = 'USD') => {
+  const key = buildPriceHistoryKey(originDestinations, currencyCode);
+  if (!key.includes('-')) return;
+  const searchedAt = new Date().toISOString();
+  offers.forEach((offer) => {
+    const price = toPriceNumber(offer?.price);
+    if (!price) return;
+    flightPriceHistory.push({
+      key,
+      price,
+      currency: String(offer.currency || currencyCode || 'USD').toUpperCase(),
+      provider: offer.provider || offer.source || 'unknown',
+      offerId: offer.id || '',
+      searchedAt,
+    });
+  });
+  if (flightPriceHistory.length > PRICE_HISTORY_LIMIT) {
+    flightPriceHistory.splice(0, flightPriceHistory.length - PRICE_HISTORY_LIMIT);
+  }
 };
 
 const normalizeOffer = (fo) => {
@@ -242,7 +372,12 @@ router.post('/flights/search', async (req, res) => {
       }
     }
 
-    const offers = mergeFlightOffers(amadeusOffers, duffelOffers);
+    const offers = enrichOffersWithPriceSignals(
+      mergeFlightOffers(amadeusOffers, duffelOffers),
+      originDestinations,
+      searchCurrencyCode
+    );
+    rememberFlightPrices(offers, originDestinations, searchCurrencyCode);
 
     if (!offers.length && providerResults[0].status === 'rejected' && providerResults[1].status === 'rejected') {
       const api = providerResults[0].reason?.response?.result;
@@ -253,12 +388,56 @@ router.post('/flights/search', async (req, res) => {
       });
     }
 
-    res.json({ offers, providers });
+    res.json({
+      offers,
+      providers,
+      priceIntel: {
+        key: buildPriceHistoryKey(originDestinations, searchCurrencyCode),
+        historySize: flightPriceHistory.length,
+        model: 'rule_based_mvp',
+      },
+    });
   } catch (err) {
     console.error('flights search error', err);
     const api = err?.response?.result;
     if (api?.errors) return res.status(400).json(api);
     res.status(500).json({ error: 'Internal error', detail: err?.message || String(err) });
+  }
+});
+
+// Lightweight PIE signal for a known flight price.
+router.get('/flights/price-index', async (req, res) => {
+  try {
+    const origin = getCode(req.query.origin);
+    const destination = getCode(req.query.destination);
+    const departDate = String(req.query.departDate || '').slice(0, 10);
+    const currencyCode = String(req.query.currencyCode || 'USD').toUpperCase();
+    const price = toPriceNumber(req.query.price);
+
+    if (!origin || !destination || !departDate || !price) {
+      return res.json({ priceSignal: null });
+    }
+
+    const originDestinations = [{
+      id: '1',
+      originLocationCode: origin,
+      destinationLocationCode: destination,
+      departureDateTimeRange: { date: departDate },
+    }];
+    const key = buildPriceHistoryKey(originDestinations, currencyCode);
+    const offer = { price, currency: currencyCode };
+
+    res.json({
+      priceSignal: computePriceSignal({
+        key,
+        originDestinations,
+        offer,
+        comparisonPrices: [price],
+      }),
+    });
+  } catch (err) {
+    console.error('price-index error', err);
+    res.json({ priceSignal: null });
   }
 });
 
@@ -286,6 +465,20 @@ router.get('/flights/date-prices', async (req, res) => {
       date: d?.departureDate,
       price: Number(d?.price?.total || 0),
     }));
+    rows.forEach((row) => {
+      const price = toPriceNumber(row.price);
+      if (!price || !row.date) return;
+      rememberFlightPrices(
+        [{ id: `date-${row.date}`, price, currency: currencyCode, provider: 'Amadeus date-prices' }],
+        [{
+          id: '1',
+          originLocationCode: origin,
+          destinationLocationCode: destination,
+          departureDateTimeRange: { date: row.date },
+        }],
+        currencyCode
+      );
+    });
 
     res.json({ rows });
   } catch (err) {
