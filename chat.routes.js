@@ -43,6 +43,8 @@ const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 const mapsProvider = createMapsProvider({ logger: console });
 const persistence = createPersistence({ logger: console });
+const PRIMARY_OPENAI_MODEL = process.env.OPENAI_TRAVEL_MODEL || process.env.OPENAI_MODEL || "gpt-4.1";
+const FALLBACK_OPENAI_MODEL = process.env.OPENAI_TRAVEL_FALLBACK_MODEL || "gpt-4o-mini";
 
 // Amadeus client
 const amadeus = new Amadeus({
@@ -2745,8 +2747,74 @@ function normalizeMessages(messages = []) {
       if (role === "assistant" && m.payload) {
         content = "[Previous plan displayed to user]";
       }
+      if (role === "system") {
+        content = normalizeEditSystemContext(content);
+      }
       return { role, content: String(content) };
     });
+}
+
+function isEditSystemContext(content = "") {
+  return String(content || "").startsWith("[SYSTEM_CONTEXT] User wants to edit");
+}
+
+function normalizeEditSystemContext(content = "") {
+  const text = String(content || "");
+  if (!isEditSystemContext(text)) return text;
+  const withoutForcedFullPlan = text.replace(
+    /When the user asks for a modification, return a complete updated trip plan, not only a suggestion\.\s*/i,
+    ""
+  );
+  return `${withoutForcedFullPlan}
+
+Edit mode rules:
+- For small edits, answer with the specific change only. Do not rebuild the whole trip.
+- For route/date/day edits, identify the affected day and stops, then provide the replacement movement or stop sequence.
+- Call create_plan only if the user asks to regenerate/rebuild the full trip, or if a full updated plan card is required.`;
+}
+
+function isEditConversation(conversation = []) {
+  return conversation.some((message) => isEditSystemContext(message?.content));
+}
+
+async function createTravelChatCompletion(params, reqId) {
+  const attempts = [
+    { model: PRIMARY_OPENAI_MODEL, includeTemperature: true },
+    { model: PRIMARY_OPENAI_MODEL, includeTemperature: false },
+    { model: FALLBACK_OPENAI_MODEL, includeTemperature: true },
+    { model: FALLBACK_OPENAI_MODEL, includeTemperature: false },
+  ].filter((attempt, index, list) =>
+    attempt.model &&
+    list.findIndex((item) =>
+      item.model === attempt.model && item.includeTemperature === attempt.includeTemperature
+    ) === index
+  );
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      const payload = { ...params, model: attempt.model };
+      if (!attempt.includeTemperature) delete payload.temperature;
+      logInfo(
+        reqId,
+        "OpenAI chat attempt",
+        attempt.model,
+        attempt.includeTemperature ? "with-temperature" : "default-temperature"
+      );
+      return await client.chat.completions.create(payload);
+    } catch (error) {
+      lastError = error;
+      logError(
+        reqId,
+        "OpenAI chat attempt failed",
+        attempt.model,
+        error?.status || error?.code || "",
+        error?.message || error
+      );
+    }
+  }
+
+  throw lastError;
 }
 
 // --- 7. MAIN ROUTE ----------------------------------------------------------
@@ -2754,7 +2822,8 @@ function normalizeMessages(messages = []) {
 router.get("/travel/capabilities", (_req, res) => {
   res.json({
     ok: true,
-    model: "gpt-5.2",
+    model: PRIMARY_OPENAI_MODEL,
+    fallbackModel: FALLBACK_OPENAI_MODEL,
     maps: {
       provider: mapsProvider.provider,
       geocoding: mapsProvider.hasGeocoding,
@@ -2924,13 +2993,12 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
 
       let completion;
       try {
-        completion = await client.chat.completions.create({
-          model: "gpt-5.2",
+        completion = await createTravelChatCompletion({
           messages: conversation,
           tools,
           tool_choice: "auto",
           temperature: 0.2,
-        });
+        }, reqId);
       } catch (err) {
         logError(reqId, "OpenAI Error", err);
         return { aiText: "My planning brain is offline briefly." };
@@ -3784,7 +3852,7 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
         lower.includes("itinerary") ||
         /day\s+\d+[:\-]/i.test(text || "");
 
-      if (looksLikeItinerary && depth < 7) {
+      if (looksLikeItinerary && !isEditConversation(conversation) && depth < 7) {
         logInfo(
           reqId,
           "[Guardrail] Intercepted text itinerary. Forcing model to use create_plan instead."
@@ -3858,7 +3926,7 @@ async function executeTravelRequest(body = {}, { onStatus } = {}) {
         lower.includes("creating") && lower.includes("itinerary") ||
         lower.includes("let me put") && lower.includes("together");
 
-      if (looksLikePlanAnnouncement && depth < 7) {
+      if (looksLikePlanAnnouncement && !isEditConversation(conversation) && depth < 7) {
         logInfo(reqId, "[Guardrail] Intercepted plan announcement without tool call. Forcing create_plan.");
         emitStatus({
           sessionMode: SESSION_MODE.PLANNING_TRIP,
