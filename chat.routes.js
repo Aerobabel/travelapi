@@ -43,8 +43,8 @@ const hasKey = Boolean(process.env.OPENAI_API_KEY);
 const client = hasKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 const mapsProvider = createMapsProvider({ logger: console });
 const persistence = createPersistence({ logger: console });
-const PRIMARY_OPENAI_MODEL = process.env.OPENAI_TRAVEL_MODEL || process.env.OPENAI_MODEL || "gpt-4.1";
-const FALLBACK_OPENAI_MODEL = process.env.OPENAI_TRAVEL_FALLBACK_MODEL || "gpt-4o-mini";
+const PRIMARY_OPENAI_MODEL = process.env.OPENAI_TRAVEL_MODEL || process.env.OPENAI_MODEL || "gpt-5.2";
+const FALLBACK_OPENAI_MODEL = process.env.OPENAI_TRAVEL_FALLBACK_MODEL || PRIMARY_OPENAI_MODEL;
 
 // Amadeus client
 const amadeus = new Amadeus({
