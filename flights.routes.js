@@ -4,6 +4,7 @@ import Amadeus from 'amadeus';
 import {
   mergeFlightOffers,
   refreshDuffelOffer,
+  searchDuffelAirports,
   searchDuffelOffers,
 } from './duffel.provider.js';
 
@@ -229,10 +230,18 @@ const normalizeOffer = (fo) => {
 
 // Airports autocomplete
 router.get('/airports', async (req, res) => {
-  try {
-    const q = (req.query.q || '').toString().trim();
-    if (!q) return res.json([]);
+  const q = (req.query.q || '').toString().trim();
+  if (!q) return res.json([]);
 
+  // Use the provider already supplying flight offers instead of depending
+  // on the failing Amadeus lookup before users can select an airport.
+  try {
+    return res.json(await searchDuffelAirports(q));
+  } catch (err) {
+    console.error('duffel airports error', err?.message || 'Lookup failed');
+  }
+
+  try {
     const { data } = await amadeus.referenceData.locations.get({
       keyword: q,
       subType: 'AIRPORT',
@@ -249,7 +258,7 @@ router.get('/airports', async (req, res) => {
 
     res.json(rows);
   } catch (err) {
-    console.error('airports error', err);
+    console.error('airports error', err?.message || 'Lookup failed');
     res.json([]);
   }
 });

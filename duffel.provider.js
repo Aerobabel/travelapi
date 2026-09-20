@@ -110,6 +110,7 @@ const requestDuffel = async (path, options = {}) => {
     method: options.method || "GET",
     headers: duffelHeaders(),
     body: options.body ? JSON.stringify(options.body) : undefined,
+    signal: options.signal,
   });
   const body = await readDuffelJson(response);
 
@@ -125,6 +126,33 @@ const requestDuffel = async (path, options = {}) => {
     body,
     requestId: response.headers.get("x-request-id"),
   };
+};
+
+// Keep the mobile app's existing { city, code, country } autocomplete contract.
+export const searchDuffelAirports = async (query) => {
+  const keyword = String(query || "").trim();
+  if (!keyword) return [];
+  const { body } = await requestDuffel("/places/suggestions", {
+    query: { query: keyword },
+    signal: AbortSignal.timeout(8000),
+  });
+  const seen = new Set();
+  const rows = [];
+  for (const place of body.data || []) {
+    const airports = place.type === "city" ? place.airports || [] : [place];
+    for (const airport of airports) {
+      const code = airport.iata_code;
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      rows.push({
+        city: airport.city_name || airport.city?.name ||
+          (place.type === "city" ? place.name : "") || airport.name || code,
+        code,
+        country: airport.iata_country_code || place.iata_country_code || "",
+      });
+    }
+  }
+  return rows.slice(0, 12);
 };
 
 const normalizeDuffelSegment = (segment = {}) => {
